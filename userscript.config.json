@@ -1,0 +1,10 @@
+{
+  "name": "BananaLoader",
+  "namespace": "https://github.com/oddnyxi",
+  "description": "A MelonLoader-style mod loader for Unity WebGL games. Mods (Banans) are JavaScript.",
+  "author": "Nyxi",
+  "icon": "assets/icon-48.png",
+  "match": ["*://*/*"],
+  "grant": ["none"],
+  "run-at": "document-start"
+}

@@ -1,0 +1,17 @@
+input[type=range] {
+  -webkit-appearance: none; appearance: none; width: 100%; height: 5px; margin: 10px 0 2px; border-radius: 5px; outline: none;
+  background: linear-gradient(90deg, var(--red) var(--pct, 0%), #2a2a32 var(--pct, 0%)); cursor: pointer;
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+  background: #fff; border: 2px solid var(--red); box-shadow: 0 0 10px rgba(var(--rgb), .7); transition: transform .1s;
+}
+input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.2); }
+input[type=range]::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%; background: #fff; border: 2px solid var(--red); }
+
+.rs { position: relative; height: 5px; margin: 16px 7px 8px; border-radius: 5px; background: #2a2a32; cursor: pointer; touch-action: none; }
+.rs i { position: absolute; top: 0; bottom: 0; background: var(--red); border-radius: 5px; }
+.rs b {
+  position: absolute; top: 50%; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; background: #fff;
+  border: 2px solid var(--red); box-shadow: 0 0 10px rgba(var(--rgb), .7); cursor: grab;
+}

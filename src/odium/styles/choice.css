@@ -1,0 +1,11 @@
+.opts { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
+.opt { display: flex; align-items: center; gap: 9px; padding: 6px 6px; border-radius: 6px; cursor: pointer; color: var(--mute); transition: .12s; }
+.opt:hover { color: var(--text); background: var(--hover); }
+.opt.on { color: var(--text); }
+.chk, .rad { width: 16px; height: 16px; flex: none; border: 2px solid #3a3a44; position: relative; transition: .15s; }
+.chk { border-radius: 4px; }
+.rad { border-radius: 50%; }
+.opt.on .chk { border-color: var(--red); background: var(--red); }
+.opt.on .chk::after { content: ""; position: absolute; left: 3px; top: -1px; width: 4px; height: 8px; border: solid var(--on); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.opt.on .rad { border-color: var(--red); }
+.opt.on .rad::after { content: ""; position: absolute; inset: 2px; border-radius: 50%; background: var(--red); }

@@ -1,0 +1,8 @@
+.ico-img { width: 16px; height: 16px; object-fit: contain; flex: none; border-radius: 3px; display: block; }
+.ico-g { flex: none; line-height: 1; display: inline-block; }
+.icn-img { width: 20px; height: 20px; object-fit: contain; border-radius: 4px; display: block; }
+.lw { gap: 8px; min-width: 0; }
+.ico-svg { flex: none; display: inline-grid; place-items: center; width: 16px; height: 16px; }
+.ico-svg svg { width: 16px; height: 16px; display: block; }
+.wbtn svg { width: 14px; height: 14px; display: block; }
+.icn svg { width: 20px; height: 20px; display: block; }

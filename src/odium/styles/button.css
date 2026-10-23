@@ -1,0 +1,23 @@
+.btn {
+  width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  background: linear-gradient(180deg, #1b1b21, #141418); color: var(--text); font: inherit; font-weight: 600; transition: .15s;
+}
+.btn:hover {
+  border-color: var(--red); background: linear-gradient(180deg, rgba(var(--rgb), .22), rgba(var(--rgb), .08));
+  box-shadow: 0 0 16px rgba(var(--rgb), .2);
+}
+.btn:active { transform: scale(.985); }
+.btn.primary { background: var(--red); border-color: var(--red); color: var(--on); }
+.btn.primary:hover { background: var(--red-hi); }
+.btn.loading { pointer-events: none; opacity: .8; }
+.btn.loading::before {
+  content: ""; width: 13px; height: 13px; border-radius: 50%; border: 2px solid rgba(var(--rgb), .3);
+  border-top-color: var(--red-hi); animation: rot .7s linear infinite;
+}
+
+.mini {
+  min-width: 26px; height: 26px; padding: 0 9px; border: 1px solid var(--line); border-radius: 6px; background: #0c0c0f;
+  color: var(--mute); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; transition: .12s;
+}
+.mini:hover { color: #fff; border-color: var(--red); }

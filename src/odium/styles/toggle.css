@@ -1,0 +1,5 @@
+.sw { position: relative; width: 36px; height: 20px; flex: none; border-radius: 20px; background: #26262d; transition: .2s; }
+.sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #8a8a96; transition: .2s; }
+.card.tg { cursor: pointer; }
+.card.tg.on .sw { background: var(--red); box-shadow: 0 0 12px rgba(var(--rgb), .55); }
+.card.tg.on .sw::after { left: 18px; background: var(--on); }

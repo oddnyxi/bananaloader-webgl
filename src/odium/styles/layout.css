@@ -1,0 +1,26 @@
+.section {
+  margin-top: 6px; font-size: 10.5px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--red-hi); display: flex; align-items: center; gap: 10px;
+}
+.section::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, var(--line), transparent); }
+.divider { height: 1px; background: var(--line); margin: 4px 0; flex: none; }
+
+.group { background: var(--raised); border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.g-head { display: flex; align-items: center; gap: 10px; padding: 9px 12px; cursor: pointer; font-weight: 600; }
+.g-head:hover { background: var(--hover); }
+.g-head .chev { transform: rotate(45deg); }
+.group.closed .g-head .chev { transform: rotate(-45deg); }
+.g-body { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-top: 1px solid var(--line); }
+.group.closed .g-body { display: none; }
+
+.cols { display: grid; gap: 8px; }
+.col { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+
+.strip { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
+.stab {
+  padding: 7px 12px; border: 0; background: transparent; color: var(--mute); font: inherit; cursor: pointer;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.stab:hover { color: var(--text); }
+.stab.on { color: #fff; border-color: var(--red); }
+.sub-pane { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; }

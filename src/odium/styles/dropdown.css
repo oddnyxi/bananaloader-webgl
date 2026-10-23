@@ -1,0 +1,12 @@
+.dd-head { cursor: pointer; }
+.dd-cur { color: var(--mute); display: flex; align-items: center; gap: 8px; }
+.chev {
+  width: 8px; height: 8px; flex: none; border-right: 2px solid var(--mute); border-bottom: 2px solid var(--mute);
+  transform: rotate(45deg) translateY(-2px); transition: .2s;
+}
+.dd.open .chev { transform: rotate(225deg); border-color: var(--red-hi); }
+.dd-list { display: none; margin-top: 8px; border-top: 1px solid var(--line); padding-top: 6px; max-height: 170px; overflow-y: auto; }
+.dd.open .dd-list { display: block; }
+.dd-item { padding: 7px 10px; border-radius: 6px; cursor: pointer; color: var(--mute); transition: .12s; }
+.dd-item:hover { background: var(--hover); color: var(--text); }
+.dd-item.on { color: #fff; background: var(--red-dim); }

@@ -1,0 +1,11 @@
+.lb { margin-top: 8px; overflow-y: auto; border: 1px solid var(--line); border-radius: 7px; background: #0c0c0f; outline: none; padding: 3px; transition: .15s; }
+.lb:focus { border-color: var(--red); box-shadow: 0 0 0 3px var(--red-dim); }
+.lb::-webkit-scrollbar { width: 8px; }
+.lb::-webkit-scrollbar-thumb { background: #2a2a32; border-radius: 8px; }
+.lb-i { display: flex; align-items: center; gap: 8px; padding: 6px 9px; border-radius: 5px; cursor: pointer; color: var(--mute); transition: .1s; }
+.lb-i:hover { background: var(--hover); color: var(--text); }
+.lb-i.on { background: var(--red-dim); color: #fff; box-shadow: inset 2px 0 0 var(--red); }
+.lb-i.cur { outline: 1px dashed rgba(var(--rgb), .45); outline-offset: -1px; }
+.lb-t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lb-h { color: #5d5d68; font-size: 11px; }
+.lb-empty { padding: 14px; text-align: center; color: #55555f; }

@@ -1,0 +1,9 @@
+.bar { height: 7px; margin-top: 8px; border-radius: 7px; background: #26262d; overflow: hidden; }
+.bar > i {
+  display: block; height: 100%; width: 0; border-radius: 7px; transition: width .25s ease;
+  background: linear-gradient(90deg, var(--red-lo), var(--red), var(--red-hi)); box-shadow: 0 0 10px var(--red);
+}
+
+.ring { width: 16px; height: 16px; flex: none; position: relative; border-radius: 50%; }
+.ring.on { border: 2px solid rgba(var(--rgb), .25); border-top-color: var(--red-hi); animation: rot .7s linear infinite; }
+.ring.ok::after { content: "✓"; position: absolute; left: 1px; top: -3px; color: #4ade80; font-weight: 700; }

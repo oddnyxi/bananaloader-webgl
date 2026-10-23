@@ -1,0 +1,48 @@
+.win {
+  position: fixed; display: flex; flex-direction: column; overflow: hidden; pointer-events: auto;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 24px 70px rgba(0,0,0,.75), 0 0 0 1px rgba(var(--rgb), .08), 0 0 40px rgba(var(--rgb), .08);
+  animation: pop .18s ease-out; user-select: none;
+}
+.win.hidden { display: none; }
+.win.min { height: auto !important; }
+.win.min .body, .win.min .foot, .win.min .grip { display: none; }
+.win::before {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 2px; z-index: 2;
+  background: linear-gradient(90deg, transparent, var(--red), var(--red-hi), var(--red), transparent);
+}
+
+.head {
+  display: flex; align-items: center; gap: 10px; padding: 12px 14px; cursor: grab;
+  background: linear-gradient(180deg, #121216, #0c0c0f); border-bottom: 1px solid var(--line);
+}
+.head:active { cursor: grabbing; }
+.logo {
+  width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; font-weight: 800; font-size: 12px;
+  background: linear-gradient(135deg, var(--red-hi), var(--red-lo)); box-shadow: 0 0 14px rgba(var(--rgb), .55); color: var(--on);
+}
+.logo.has-img { background: none; box-shadow: none; width: 24px; height: 24px; }
+.logo.none { display: none; }
+.logo-img { width: 100%; height: 100%; object-fit: contain; border-radius: 6px; display: block; }
+.logo-img.ico-svg, .logo-img.ico-svg svg { width: 100%; height: 100%; }
+.title { font-weight: 700; letter-spacing: .14em; font-size: 12px; text-transform: uppercase; }
+.sub { color: var(--mute); font-size: 11px; margin-left: 2px; }
+.spacer { flex: 1; }
+.wbtn {
+  width: 24px; height: 24px; border: 0; border-radius: 6px; background: transparent; color: var(--mute);
+  cursor: pointer; display: grid; place-items: center; font-size: 14px; transition: .15s;
+}
+.wbtn:hover { background: var(--hover); color: var(--text); }
+.wbtn.x:hover { background: var(--red); color: var(--on); }
+
+.body { display: flex; flex: 1; min-height: 0; }
+
+.foot {
+  display: flex; justify-content: space-between; padding: 7px 26px 7px 14px; font-size: 11px; color: var(--mute);
+  background: var(--panel); border-top: 1px solid var(--line);
+}
+.foot b { color: var(--red-hi); font-weight: 600; }
+
+.grip { position: absolute; right: 0; bottom: 0; width: 18px; height: 18px; cursor: nwse-resize; touch-action: none; z-index: 3; }
+.grip::after { content: ""; position: absolute; right: 4px; bottom: 4px; width: 8px; height: 8px; border-right: 2px solid #44444e; border-bottom: 2px solid #44444e; }
+.grip:hover::after { border-color: var(--red); }

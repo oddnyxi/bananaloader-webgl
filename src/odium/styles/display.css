@@ -1,0 +1,36 @@
+.text { color: var(--mute); padding: 2px 2px; }
+.text.multi { white-space: pre-wrap; line-height: 1.55; user-select: text; }
+
+.badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; border: 1px solid; }
+.b-red   { color: var(--red-hi); background: var(--red-dim); border-color: rgba(var(--rgb), .4); }
+.b-green { color: #4ade80; background: rgba(34,197,94,.12);  border-color: rgba(34,197,94,.35); }
+.b-amber { color: #fbbf24; background: rgba(245,158,11,.12); border-color: rgba(245,158,11,.35); }
+.b-blue  { color: #60a5fa; background: rgba(59,130,246,.12); border-color: rgba(59,130,246,.35); }
+.b-gray  { color: var(--mute); background: rgba(138,138,150,.1); border-color: rgba(138,138,150,.3); }
+
+.icn { width: 32px; height: 32px; border-radius: 8px; display: grid; place-items: center; background: var(--red-dim); color: var(--red-hi); font-size: 16px; flex: none; }
+
+.img { width: 100%; border-radius: 9px; border: 1px solid var(--line); display: block; background: #0c0c0f; }
+.chart { width: 100%; margin-top: 8px; display: block; border-radius: 6px; background: #0c0c0f; border: 1px solid var(--line); }
+
+.log-area {
+  margin-top: 8px; overflow-y: auto; background: #0a0a0d; border: 1px solid var(--line); border-radius: 7px; padding: 6px 8px;
+  font: 11.5px/1.5 ui-monospace, Consolas, monospace; user-select: text;
+}
+.ll { white-space: pre-wrap; word-break: break-word; color: var(--text); }
+.ll i { color: #55555f; font-style: normal; margin-right: 8px; }
+.ll.success { color: #4ade80; }
+.ll.warn { color: #fbbf24; }
+.ll.error { color: #f87171; }
+
+.tbl-wrap { max-height: 180px; overflow: auto; border: 1px solid var(--line); border-radius: 9px; background: var(--raised); }
+table { width: 100%; border-collapse: collapse; font-size: 12px; user-select: text; }
+th { position: sticky; top: 0; background: #14141a; text-align: left; padding: 8px 10px; color: var(--red-hi); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; }
+td { padding: 7px 10px; border-top: 1px solid var(--line); color: var(--text); }
+tbody tr:hover { background: var(--hover); }
+.tbl-wrap.clickable tbody tr { cursor: pointer; }
+
+.code {
+  margin: 8px 0 0; padding: 9px 10px; background: #0a0a0d; border: 1px solid var(--line); border-radius: 7px;
+  font: 11.5px/1.5 ui-monospace, Consolas, monospace; color: #d6d6de; overflow: auto; white-space: pre; user-select: text; max-height: 200px;
+}

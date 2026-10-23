@@ -1,0 +1,8 @@
+.card { background: var(--raised); border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; transition: border-color .15s; }
+.card:hover { border-color: #34343d; }
+.group .card { background: var(--panel); }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.left { display: flex; align-items: center; gap: 10px; }
+.lbl { color: var(--text); }
+.val { color: var(--red-hi); font-variant-numeric: tabular-nums; font-weight: 600; font-size: 12px; }
+.sublbl { color: var(--mute); font-size: 11.5px; }

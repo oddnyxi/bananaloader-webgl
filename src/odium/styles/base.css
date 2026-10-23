@@ -1,0 +1,20 @@
+:host { all: initial; }
+*, *::before, *::after { box-sizing: border-box; }
+
+.root {
+  --rgb: 225,29,46; --red: #e11d2e; --red-hi: #ff3d4d; --red-lo: #8c0b17; --on: #fff;
+  --red-dim: rgba(var(--rgb), .14);
+  --bg: #09090b; --panel: #101013; --raised: #17171c; --hover: #1e1e24; --line: #26262d;
+  --text: #ececf1; --mute: #8a8a96;
+  font: 13px/1.4 "Inter", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+@keyframes pop   { from { opacity: 0; transform: scale(.97) translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes fade  { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes rot   { to { transform: rotate(360deg); } }
+@keyframes blink { 50% { opacity: .55; } }
+
+.filtered { display: none !important; }
+.disabled { opacity: .42; pointer-events: none; filter: saturate(.5); }
