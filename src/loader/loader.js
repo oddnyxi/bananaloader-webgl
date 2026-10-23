@@ -13,8 +13,9 @@ import { LogHub } from './logger.js';
 import { Store } from './store.js';
 import { Coroutines } from './coroutines.js';
 import { Overlay } from './overlay.js';
+import { TypeGen } from './typegen.js';
 
-export const VERSION = '1.0.0';
+export const VERSION = '1.1.0';
 const SETTINGS_KEY = 'bananaloader:settings';
 const STAGES = ['boot', 'pre', 'started', 'initialized', 'late'];
 const PALETTE = ['#f5c518', '#4ade80', '#60a5fa', '#f472b6', '#a78bfa', '#fb923c', '#2dd4bf', '#facc15', '#f87171', '#38bdf8'];
@@ -92,6 +93,8 @@ export class BananaLoader {
         games: info.game || ['*'],
         color: info.color || PALETTE[[...String(rec.id)].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7) % PALETTE.length],
         homepage: info.homepage || info.url || '',
+        requires: (info.require || []).map(parseDep),
+        optional: (info.optional || []).map(parseDep),
       },
       state: e.state || 'idle',
       instance: e.instance || null,
@@ -124,8 +127,65 @@ export class BananaLoader {
   }
 
   /** Plugins first, then mods, each by name. */
+  /** Load order: plugins before mods, dependencies before dependents, then by name. */
   ordered() {
-    return [...this.entries.values()].sort((a, b) => (a.info.type === b.info.type ? a.info.name.localeCompare(b.info.name) : a.info.type === 'plugin' ? -1 : 1));
+    const list = [...this.entries.values()].sort((a, b) => (a.info.type === b.info.type ? a.info.name.localeCompare(b.info.name) : a.info.type === 'plugin' ? -1 : 1));
+    const out = [];
+    const state = new Map();
+    const visit = (e) => {
+      const st = state.get(e);
+      if (st === 2) return;
+      if (st === 1) return; // cycle: reported when loading
+      state.set(e, 1);
+      for (const d of [...e.info.requires, ...e.info.optional]) { const de = this._entry(d.name); if (de) visit(de); }
+      state.set(e, 2);
+      out.push(e);
+    };
+    for (const e of list) visit(e);
+    return out;
+  }
+
+  /** Banans that require e (directly or not). */
+  dependents(e) {
+    const out = [];
+    const seen = new Set([e]);
+    const walk = (x) => {
+      for (const o of this.entries.values()) {
+        if (seen.has(o)) continue;
+        if ([...o.info.requires, ...o.info.optional].some((d) => this._entry(d.name) === x)) { seen.add(o); walk(o); out.push(o); }
+      }
+    };
+    walk(e);
+    return out.reverse();
+  }
+
+  /** Load Banans that failed only because e was missing, disabled or too old. */
+  _wakeWaiting(e) {
+    if (e.state !== 'loaded') return;
+    for (const d of this.dependents(e)) {
+      if (d.state === 'error' && d.rec.enabled !== false && d.info.requires.some((r) => this._entry(r.name) === e)) this.load(d, { quiet: true });
+    }
+  }
+
+  /** null if requirements are met (loading them if needed), else an error string. */
+  _deps(e, chain = []) {
+    if (chain.includes(e)) return `dependency cycle: ${[...chain, e].map((x) => x.info.name).join(' → ')}`;
+    for (const d of e.info.requires) {
+      const de = this._entry(d.name);
+      if (!de) return `requires ${d.name}${d.range ? ' ' + d.range : ''}, which isn't installed`;
+      if (de.rec.enabled === false) return `requires ${d.name}, which is disabled`;
+      if (d.range && !satisfies(de.info.version, d.range)) return `requires ${d.name} ${d.range} (installed: ${de.info.version})`;
+      if (de.state !== 'loaded') {
+        const err = this._deps(de, [...chain, e]);
+        if (err) return `${d.name}: ${err}`;
+        if (!this.load(de, { quiet: true })) return `requires ${d.name}, which failed to load`;
+      }
+    }
+    for (const d of e.info.optional) {
+      const de = this._entry(d.name);
+      if (de && de.rec.enabled !== false && de.state !== 'loaded' && !this._deps(de, [...chain, e])) this.load(de, { quiet: true });
+    }
+    return null;
   }
 
   initIl2Cpp(attempt = 0) {
@@ -208,6 +268,8 @@ export class BananaLoader {
     if (e.state === 'loaded') return true;
     e.error = null;
     if (!this.matchesGame(e)) { e.state = 'skipped'; e.error = `not for this game (${e.info.games.join(', ')})`; this.emit('banans'); return false; }
+    const depErr = this._deps(e);
+    if (depErr) { e.state = 'error'; e.error = depErr; this.log.error(`${e.info.name}: ${depErr}`); this.emit('banans'); return false; }
     const logger = this.hub.logger(e.info.name, e.info.color);
     let inst;
     try {
@@ -242,6 +304,8 @@ export class BananaLoader {
 
   unload(e) {
     if (e.state !== 'loaded' || !e.instance) { e.state = 'idle'; this.emit('banans'); return; }
+    // dependents go first
+    for (const d of this.dependents(e)) if (d.state === 'loaded') { this.unload(d); d.state = 'idle'; d._unloadedFor = e; }
     const inst = e.instance;
     this.safe(inst, 'onDeinitializeBanan');
     this.patcher.unpatchOwner(inst);
@@ -257,9 +321,12 @@ export class BananaLoader {
   }
 
   reload(e) {
+    const deps = this.dependents(e).filter((d) => d.state === 'loaded');
     this.unload(e);
     this._addEntry(e.rec);
-    return this.load(e);
+    const ok = this.load(e);
+    for (const d of deps) if (d.rec.enabled !== false) this.load(d, { quiet: true });
+    return ok;
   }
 
   // ------------------------------------------------------------------ install / remove
@@ -271,9 +338,14 @@ export class BananaLoader {
     if (existing && existing.rec.origin === 'folder') id += '-copy';
     const rec = { id, source, origin, url, file, enabled: true, name: info.name };
     await this.store.put(rec);
-    const e = this._addEntry(rec);
+    const deps = existing ? this.dependents(existing).filter((d) => d.state === 'loaded') : [];
     if (existing && existing.state === 'loaded') this.unload(existing);
-    if (this.stageAtLeast('pre') && !this.settings.safeMode) this.load(e);
+    const e = this._addEntry(rec);
+    if (this.stageAtLeast('pre') && !this.settings.safeMode) {
+      this.load(e);
+      for (const d of deps) if (d.rec.enabled !== false) this.load(d, { quiet: true });
+      this._wakeWaiting(e);
+    }
     this.emit('banans');
     return e;
   }
@@ -307,7 +379,11 @@ export class BananaLoader {
       states[e.id] = on;
       await this.store.setMeta('folderStates', states);
     } else await this.store.put(e.rec);
-    if (on) this.load(e); else this.unload(e);
+    if (on) {
+      this.load(e);
+      for (const d of this.entries.values()) if (d._unloadedFor === e && d.rec.enabled !== false) { d._unloadedFor = null; this.load(d, { quiet: true }); }
+      this._wakeWaiting(e);
+    } else this.unload(e);
   }
 
   async remove(e) {
@@ -529,10 +605,52 @@ export class BananaLoader {
       },
       logger: (name, color) => self.hub.logger(name, color),
       patch: (target, hooks) => self.patcher.patch(null, target, hooks),
+      /** TypeScript definitions for the game: generateTypes({ assemblies: ['Assembly-CSharp', ...], publicOnly }) */
+      generateTypes: (o = {}) => {
+        const il = self.il;
+        if (!il) throw new Error('IL2CPP is not ready');
+        const names = o.assemblies ? new Set(o.assemblies.map((n) => n.replace(/\.dll$/, ''))) : null;
+        const images = il.md.images.map((im, i) => [im.name.replace(/\.dll$/, ''), i]).filter(([n]) => !names || names.has(n)).map(([, i]) => i);
+        const gen = new TypeGen(il);
+        gen.game = `${self.game.product} (Unity ${self.game.unity})`;
+        return gen.generate({ images, publicOnly: o.publicOnly !== false });
+      },
       install: (source, o) => self.install(source, o),
       installFromUrl: (url) => self.installFromUrl(url),
+      uninstall: async (name) => { const e = self._entry(name); if (!e) throw new Error('no Banan ' + name); await self.remove(e); },
       on: (ev, fn) => self.on(ev, fn),
     };
     return this._api;
+  }
+}
+
+/** "Name >=1.2.0" -> { name, range } (the range is optional) */
+function parseDep(s) {
+  const m = /^(.*?)\s*((?:>=|<=|>|<|=|\^|~)\s*\d[\w.\-]*)?$/.exec(s.trim());
+  return { name: m[1].trim(), range: m[2] ? m[2].replace(/\s+/g, '') : '' };
+}
+
+function cmp(a, b) {
+  const pa = String(a).split(/[.\-]/).map((x) => parseInt(x, 10) || 0);
+  const pb = String(b).split(/[.\-]/).map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) { const d = (pa[i] || 0) - (pb[i] || 0); if (d) return d; }
+  return 0;
+}
+
+export function satisfies(v, range) {
+  const parts = String(range).trim().split(/\s+/);
+  if (parts.length > 1) return parts.every((r) => satisfies(v, r));
+  const m = /^(>=|<=|>|<|=|\^|~)?(.+)$/.exec(range);
+  const op = m[1] || '=';
+  const want = m[2];
+  const c = cmp(v, want);
+  switch (op) {
+    case '>=': return c >= 0;
+    case '<=': return c <= 0;
+    case '>': return c > 0;
+    case '<': return c < 0;
+    case '^': return c >= 0 && String(v).split('.')[0] === String(want).split('.')[0];
+    case '~': return c >= 0 && String(v).split('.').slice(0, 2).join('.') === String(want).split('.').slice(0, 2).join('.');
+    default: return c === 0;
   }
 }

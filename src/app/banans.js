@@ -147,7 +147,9 @@ export class BanansView {
           h('span.chip', { title: e.rec.url || e.rec.file || '' }, icon(oico, 'i'), oname),
           patches ? h('span.chip.red', `${patches} patch${patches === 1 ? '' : 'es'}`) : null,
           prefs ? h('span.chip', `${prefs} pref${prefs === 1 ? '' : 's'}`) : null,
-          info.games.join(',') !== '*' ? h('span.chip', { title: 'Games' }, info.games.join(', ')) : null),
+          info.games.join(',') !== '*' ? h('span.chip', { title: 'Games' }, info.games.join(', ')) : null,
+          ...info.requires.map((d) => h('span.chip' + (L._entry(d.name) && L._entry(d.name).state === 'loaded' ? '' : '.amber'), { title: 'Requires' }, icon(B.link, 'i'), d.name + (d.range ? ' ' + d.range : ''))),
+          ...info.optional.map((d) => h('span.chip', { title: 'Optional dependency' }, icon(B.link, 'i'), d.name + '?'))),
         e.error ? h('div.bl-error', { text: e.error }) : null),
       h('div.bl-side', sw, actions));
   }

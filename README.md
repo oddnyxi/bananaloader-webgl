@@ -25,7 +25,10 @@
 - [The Banan header](#the-banan-header)
 - [Lifecycle](#lifecycle)
 - [Il2Cpp interop](#il2cpp-interop)
+- [Generics](#generics)
 - [Patching (Harmony)](#patching-harmony)
+- [Dependencies](#dependencies)
+- [TypeScript](#typescript)
 - [Preferences](#preferences)
 - [Logging](#logging)
 - [Coroutines](#coroutines)
@@ -45,10 +48,13 @@
 
 - **Banans** are JavaScript mods with MelonLoader's lifecycle: `onInitializeBanan`, `onSceneWasLoaded`, `onUpdate`, `onGUI` and the rest.
 - **Il2Cpp interop:** game types and objects behave like JS objects, so `Il2Cpp.type('UnityEngine.Time').timeScale = 0.5` works.
-- **Harmony-style patches:** prefixes and postfixes on IL2CPP methods. Prefixes can skip the original or replace the result.
+- **Harmony-style patches on every method:** prefixes and postfixes on IL2CPP methods, including non-virtual ones that game code calls directly. Prefixes can skip the original or replace the result.
+- **Generics:** `List<int>`, `Dictionary<string, Player>`, `GetComponent<T>()`. You can call them, construct them and patch them.
+- **Dependencies:** a Banan can `@require` another one (with a version range) and use its API.
+- **TypeScript autocomplete:** export a `.d.ts` of the game's types, so `Il2Cpp.find('UnityEngine.Camera').` completes in VS Code.
 - **Preferences:** saved settings per Banan, with controls generated in the UI.
 - **Hot reload:** edit a Banan in the built-in editor and press <kbd>Ctrl</kbd>+<kbd>S</kbd>; it unloads (patches, tabs and timers included) and loads again without restarting the game.
-- **Built-in Unity Explorer:** browse the scene, inspect objects and call methods, in the same window.
+- **Built-in Unity Explorer:** browse the scene, inspect objects and call methods, in the same window. Click an object in the game view to select it.
 - **Odium UI:** black and red, toggled with <kbd>F8</kbd>.
 
 ## Install
@@ -106,8 +112,9 @@ module.exports = class SlowMotion extends Banan {
 | `MelonLogger.Msg / Warning / Error` | `this.logger.msg / warning / error` |
 | `MelonPreferences.CreateCategory / CreateEntry` | `this.pref(...)` or `BananaLoader.Preferences.createCategory(...).createEntry(...)` |
 | `HarmonyInstance.Patch(...)`, `[HarmonyPatch]` | `this.patch('Type::Method', { prefix, postfix })` |
+| `[MelonAdditionalDependencies]`, `[MelonOptionalDependencies]` | `// @require Name >=1.0.0`, `// @optional Name` |
 | `MelonCoroutines.Start(IEnumerator)` | `this.startCoroutine(function* () { ... })` |
-| `Il2CppInterop` generated proxies | `Il2Cpp.type(...)`, `Il2Cpp.find(...)`: proxies built at runtime |
+| `Il2CppInterop` generated proxies | `Il2Cpp.type(...)`, `Il2Cpp.find(...)`: proxies built at runtime, typed by an exported `game.d.ts` |
 | UnityExplorer (a separate mod) | built in: the Scene and Classes tabs |
 
 ## The Banan header
@@ -121,6 +128,8 @@ module.exports = class SlowMotion extends Banan {
 // @game        Bullet Force        (repeatable; matches the product name; * = any; wildcards ok)
 // @type        mod | plugin         (plugins load first and get onPreInitialize/onApplicationStarted)
 // @color       #f5c518              (console colour; picked for you if omitted)
+// @require     Other Banan >=1.2.0  (repeatable; loads first; see Dependencies)
+// @optional    Another Banan        (repeatable; loads first if it's installed)
 // @homepage    https://…
 // ==/Banan==
 ```
@@ -191,6 +200,33 @@ Arrays are proxies too: index into them, read `length`, or use `for…of`.
 
 Values convert like this: strings ↔ JS strings, numbers, booleans, `long` ↔ BigInt, enums ↔ numbers, structs ↔ plain objects, and objects ↔ proxies (`null` for null). The raw bridge is still there as `Il2Cpp.il`, along with the scene helpers as `Il2Cpp.unity`.
 
+## Generics
+
+Generic types are named the way C# writes them. Type arguments are full names, or C# keywords such as `int` and `string`:
+
+```js
+const List = Il2Cpp.type('System.Collections.Generic.List<int>');
+const list = List.$new();
+list.Add(1); list.Add(2);
+list.Count;                                   // 2
+list.get_Item(0);                             // 1
+for (const x of list.$toArray()) { ... }
+
+const scores = Il2Cpp.new('System.Collections.Generic.Dictionary<string, int>');
+scores.set_Item('nyxi', 9001);
+const out = Il2Cpp.ref(0);
+scores.TryGetValue('nyxi', out);              // true, out.value === 9001
+```
+
+Generic methods take their type arguments through `.of(...)`:
+
+```js
+const go = Il2Cpp.gameObject('Main Camera');
+go.GetComponent.of('UnityEngine.Camera')();  // GetComponent<Camera>()
+```
+
+Type arguments can be generic or arrays themselves: `Dictionary<string, List<int>>`, `List<string[]>`. As with C#, only instantiations the game was built with exist (see [Limitations](#limitations)).
+
 ## Patching (Harmony)
 
 ```js
@@ -221,13 +257,68 @@ this.patch('Weapon::GetDamage', {
 
 Patches belong to the Banan that made them and are removed when it unloads. `this.patch()` returns a handle with `.unpatch()`. Several Banans can patch the same method; `priority` sets the order. The **Patches** tab lists every active patch with its call and error counts.
 
-**What can be patched:** any call that goes through the wasm function table, which covers:
-- virtual and interface methods
-- Unity messages (`Update`, `FixedUpdate`, `OnTriggerEnter`, `OnPointerClick`, …)
-- delegates and events, `Invoke` and reflection
-- engine callbacks such as `SceneManager.sceneLoaded`
+Generic targets work too. Each instantiation is patched separately, even where IL2CPP shares one compiled body between them:
 
-Calls to non-virtual methods that IL2CPP compiled directly into game code go straight to the function and skip the patch. It's the same situation as Harmony and inlined methods. To catch those, patch the virtual or engine-called method that leads to them.
+```js
+this.patch('System.Collections.Generic.List<int>::Add', { prefix(ctx) { ctx.setArg(0, 42); } });
+this.patch('UnityEngine.GameObject::GetComponent<UnityEngine.Rigidbody>', { postfix(ctx) { ... } });
+this.patch(Il2Cpp.method('PlayerController::TakeDamage', ['System.Single']), { ... });   // a descriptor
+```
+
+**Every call is caught, including direct ones.** IL2CPP compiles most non-virtual calls as direct `call` instructions in the wasm, which never pass through the function table. When a Banan patches one of those methods, BananaLoader rewrites the game's wasm on the next load, so each direct call to it goes through the table instead. The **Patches** tab shows a patch's coverage:
+
+| Coverage | Means |
+| --- | --- |
+| **all** | every caller is hooked |
+| **pending** | indirect calls are hooked now, direct calls after a page reload. The tab offers a **Reload now** button. |
+| **indirect** | direct-call patching is off (Settings), or the build couldn't be rewritten |
+
+The rewrite only touches call sites of patched methods, takes about a second even for a 100 MB build, and is cached per build. Turning **Direct-call patching** off in Settings, or turning on Safe mode, loads the original wasm untouched.
+
+## Dependencies
+
+```js
+// ==Banan==
+// @name     Scene Report
+// @require  Scene Tools >=1.0.0
+// @optional FPS Overlay
+// ==/Banan==
+
+module.exports = class extends Banan {
+  onInitializeBanan() {
+    const tools = this.require('Scene Tools');   // its `api`, or the instance if it has none
+    const fps = this.optional('FPS Overlay');    // null when it isn't installed
+  }
+};
+```
+
+A library Banan sets `this.api = { ... }` in `onInitializeBanan`. The rules:
+
+- **Load order.** Required and optional Banans load first. Cycles and missing or disabled requirements show up as a clear error on the Banan's card.
+- **Versions.** Ranges use `>=`, `>`, `<=`, `<`, `=`, `^` and `~`. Space-separated ranges must all match.
+- **Unloading.** Unloading, reloading or updating a library unloads its dependents first and loads them again afterwards.
+- **Late dependencies.** A Banan waiting on a missing library loads as soon as the library is installed or enabled.
+
+The Banans tab shows each Banan's requirements as chips. See [`scene-tools-lib.js`](examples/scene-tools-lib.js) and [`scene-report.js`](examples/scene-report.js).
+
+## TypeScript
+
+**Settings → TypeScript** exports three files:
+
+- **`game.d.ts`:** every type in the game's assemblies, generated from its metadata. Pick which assemblies to include, and whether to keep only public members.
+- **`bananaloader.d.ts`:** the BananaLoader API.
+- **`jsconfig.json`**
+
+Put them next to your Banans and VS Code completes and type-checks plain JavaScript:
+
+```js
+const cam = Il2Cpp.find('UnityEngine.Camera');   // typed as UnityEngine.Camera
+cam.fieldOfView = 90;                             // number
+cam.transform.position.x;                         // Vector3 fields
+Il2Cpp.type('UnityEngine.Time').timeScale;        // statics
+```
+
+Game types live under `Il2Cpp.Types.<namespace>`, e.g. `Il2Cpp.Types.UnityEngine.Camera`, for JSDoc annotations. `Il2CppTypeMap` maps full names to `[instance, static]`. The same export is available from code: `BananaLoader.generateTypes({ assemblies, publicOnly })`.
 
 ## Preferences
 
@@ -302,6 +393,8 @@ Turning on **Safe mode** in Settings starts the game with every Banan disabled, 
 
 The **Scene** and **Classes** tabs are Unity Explorer, built in: a hierarchy, an inspector with live editing and method calls, and a class browser. From the console prompt, `inspect(obj)` opens any proxy in them.
 
+**Picking objects.** Press the target button in the Scene tab, hover the game and click. It checks, in order, UI elements under the cursor (topmost canvas first), a camera raycast against 3D colliders, then 2D colliders. The hovered object is outlined with its name and type. <kbd>Esc</kbd> or right-click cancels.
+
 ## Example Banans
 
 | File | Shows |
@@ -311,6 +404,8 @@ The **Scene** and **Classes** tabs are Unity Explorer, built in: a hierarchy, an
 | [`fps-overlay.js`](examples/fps-overlay.js) | `onGUI` drawing and a dropdown preference |
 | [`button-logger.js`](examples/button-logger.js) | a Harmony-style prefix that can skip the original |
 | [`log-mirror.js`](examples/log-mirror.js) | a plugin using `onPreInitialize` to catch the engine's first log lines |
+| [`scene-tools-lib.js`](examples/scene-tools-lib.js) | a library Banan exposing an `api` |
+| [`scene-report.js`](examples/scene-report.js) | `@require` / `@optional` and using another Banan's API |
 
 ## How it works
 
@@ -325,12 +420,14 @@ The **Scene** and **Classes** tabs are Unity Explorer, built in: a hierarchy, an
    - A tiny wasm module is generated that imports the JS hook and re-exports it with the method's exact wasm signature (the same trick as Emscripten's `addFunction`).
    - The method's slot in the function table is swapped for that function. Every indirect call (vtables, `MethodInfo`, delegates, invokers) now lands in the hook, and the original is kept to call through to.
    - Unpatching swaps the original back in.
+   - Shared generic code is told apart by the `MethodInfo*` IL2CPP passes as the last argument.
+   - **Direct calls.** `WebAssembly.instantiateStreaming` is hooked at `document-start`. When patches need it, the code section is decoded and each `call f` to a patched function becomes `i32.const slot; call_indirect`, which is the same call through the table, so it lands in the hook. Nothing else in the module changes.
 5. **Scenes.** BananaLoader patches `SceneManager.Internal_SceneLoaded` and `Internal_SceneUnloaded`, which the engine calls for every load. If a build lacks them, it polls instead.
 
 ## Limitations
 
-- **Direct calls skip patches.** Non-virtual calls compiled straight into game code don't go through the function table (see [Patching](#patching-harmony)).
-- **Generics.** Generic methods and methods of generic types can't be patched or called, though their objects can still be read and written.
+- **Direct calls need one reload.** A new patch on a directly-called method catches every caller only after the page reloads (coverage **pending** until then). Methods IL2CPP inlined into their callers can't be patched at all, as with Harmony.
+- **Generic instantiations the game never used.** IL2CPP only compiles the generic instantiations the game needs (plus shared reference-type code). `List<MyStruct>` works only if the game uses it.
 - **Stripped code.** Anything the game never used isn't in the build. Accessing a stripped member returns `undefined`, and calling one throws a clear error.
 - **Scene names.** If a build strips the scene-name APIs, scenes are reported as `Scene <handle>`.
 - **Banans run in the page with the game's privileges.** Only install Banans you trust, just as you would with DLL mods.
@@ -355,6 +452,9 @@ bananaloader/
 │   │   ├── interop.js       Il2Cpp proxies
 │   │   ├── patcher.js       Harmony-style patching through the function table
 │   │   ├── wasmfn.js        JS function -> typed wasm function
+│   │   ├── wasmrewrite.js   direct call -> call_indirect rewriting of the game's wasm
+│   │   ├── typegen.js       game.d.ts generator
+│   │   ├── bananaloader.d.ts API typings
 │   │   ├── prefs.js         BananaPreferences
 │   │   ├── logger.js        loggers and the console feed
 │   │   ├── coroutines.js    generator coroutines
@@ -362,7 +462,7 @@ bananaloader/
 │   │   └── store.js         IndexedDB and linked folder
 │   ├── app/                 the window: Banans, Console, Preferences, Patches, Editor, Settings
 │   ├── il2cpp/              IL2CPP bridge (from Unity Explorer)
-│   ├── ui/                  explorer views (from Unity Explorer)
+│   ├── ui/                  explorer views and the in-game picker (shared with Unity Explorer)
 │   └── odium/               Odium UI
 ├── examples/                example Banans
 └── scripts/build.js
@@ -371,5 +471,3 @@ bananaloader/
 ## License
 
 [MIT with attribution](LICENSE.md). © 2025-2026 Nyxi. BananaLoader is inspired by [MelonLoader](https://github.com/LavaGang/MelonLoader) but shares no code with it.
-#   b a n a n a l o a d e r - w e b g l  
- 

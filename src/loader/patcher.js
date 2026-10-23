@@ -7,7 +7,8 @@
 // into game code don't use the table and are not intercepted.
 
 import { wasmFunction } from './wasmfn.js';
-import { T, METHOD } from '../il2cpp/types.js';
+import { readPlan, writePlan } from '../hook.js';
+import { T } from '../il2cpp/types.js';
 
 const WASM = { i32: 'i32', ptr: 'i32', i64: 'i64', f32: 'f32', f64: 'f64' };
 
@@ -20,32 +21,9 @@ export class Patcher {
 
   get il() { return this.loader.il; }
 
-  /** Resolve "Namespace.Type::Method" (+ optional signature) or a method record. */
+  /** Resolve a target into a callable descriptor (see Interop.resolveMethod). */
   resolve(target, sig) {
-    const il = this.il;
-    if (target && typeof target === 'object' && target.token !== undefined) return target;
-    if (typeof target !== 'string') throw new TypeError('patch target must be "Type::Method" or a method record');
-    let [type, name] = target.split('::');
-    if (!name) { const i = target.lastIndexOf('.'); type = target.slice(0, i); name = target.slice(i + 1); }
-    const td = il.findType(type);
-    if (td < 0) throw new Error(`patch: type ${type} not found`);
-    // only methods declared on the type itself (patching a base method would hit every subclass)
-    let cands = il.methodsOf(td).filter((m) => m.name === name);
-    if (!cands.length) {
-      const inherited = il.findMethod(td, name, sig);
-      if (inherited) cands = [inherited];
-    }
-    if (sig !== undefined) {
-      cands = cands.filter((m) => {
-        if (typeof sig === 'number') return m.parameterCount === sig;
-        if (m.parameterCount !== sig.length) return false;
-        const ps = il.params(m);
-        return sig.every((s, k) => s === '*' || il.typeName(ps[k].type, true) === s || il.typeName(ps[k].type) === s);
-      });
-    }
-    if (!cands.length) throw new Error(`patch: ${type}::${name} not found${sig !== undefined ? ' with that signature' : ''}`);
-    if (cands.length > 1) throw new Error(`patch: ${type}::${name} has ${cands.length} overloads; pass a signature (parameter count or type names)`);
-    return cands[0];
+    return this.loader.interop.resolveMethod(target, sig);
   }
 
   /**
@@ -55,22 +33,24 @@ export class Patcher {
    */
   patch(owner, target, hooks) {
     const il = this.il;
-    const m = this.resolve(target, hooks.sig);
-    const why = m.genericContainerIndex !== -1 ? 'generic method' : il.md.typeDef(m.declaringType).isGeneric ? 'method of a generic type' : null;
-    if (why) throw new Error(`patch: can't patch a ${why}`);
-    const ptr = il.methodPointer(m);
-    if (!ptr) throw new Error(`patch: ${il.tdFullName(m.declaringType)}::${m.name} has no code in this build (stripped or abstract)`);
+    const d = this.resolve(target, hooks.sig);
+    const why = il.whyNotCallable(d);
+    if (why) throw new Error(`patch: can't patch ${d.label}: ${why}`);
+    const ptr = d.ptr;
     let pm = this.byPtr.get(ptr);
     if (!pm) {
-      pm = new PatchedMethod(this, m, ptr);
+      pm = new PatchedMethod(this, d, ptr);
       this.byPtr.set(ptr, pm);
-    } else if (pm.method.index !== m.index) {
-      this.loader.log.warn(`${il.tdFullName(m.declaringType)}::${m.name} shares its code with ${il.tdFullName(pm.method.declaringType)}::${pm.method.name}; both are patched`);
+    } else if (pm.method.label !== d.label && !d.mi) {
+      this.loader.log.warn(`${d.label} shares its code with ${pm.method.label}; both are patched`);
     }
+    const m = d;
     const p = {
       owner,
       method: m,
-      target: `${il.tdFullName(m.declaringType)}::${m.name}`,
+      target: d.label,
+      // shared generic code serves several instantiations: only run for ours (the caller passes its MethodInfo*)
+      mi: d.mi || 0,
       prefix: hooks.prefix || null,
       postfix: hooks.postfix || null,
       priority: hooks.priority || 0,
@@ -81,14 +61,41 @@ export class Patcher {
     };
     pm.add(p);
     this.all.add(p);
+    const w = this.wasm;
+    p.coverage = !w ? 'indirect' : w.applied.includes(ptr) ? 'all' : 'pending';
+    if (owner) this._savePlan();
+    this.loader.emit('patches');
     return p;
   }
+
+  /** What the document-start hook did with the game's wasm (null if it loaded before us). */
+  get wasm() { return (window.__ueHooks && window.__ueHooks.wasm) || null; }
+
+  /** Remember which functions need their direct calls rewritten on the next load. */
+  _savePlan() {
+    clearTimeout(this._pt);
+    this._pt = setTimeout(() => {
+      const w = this.wasm;
+      if (!w || !w.key || this.loader.settings.directCalls === false) return;
+      const slots = new Set();
+      const labels = {};
+      for (const p of this.all) if (p.owner && p.active) { slots.add(p.method.ptr); labels[p.method.ptr] = p.target; }
+      const prev = readPlan(w.key);
+      writePlan(w.key, { byteLength: w.byteLength, slots: [...slots], labels, saved: Date.now() });
+      if (!prev || JSON.stringify([...(prev.slots || [])].sort()) !== JSON.stringify([...slots].sort())) this.loader.emit('patches');
+    }, 300);
+  }
+
+  /** Patches that will also catch direct calls after a reload. */
+  pendingDirect() { return [...this.all].filter((p) => p.owner && p.active && p.coverage === 'pending'); }
 
   unpatch(p) {
     if (!p.active) return;
     p.active = false;
     this.all.delete(p);
-    const pm = this.byPtr.get(this.il.methodPointer(p.method));
+    if (p.owner) this._savePlan();
+    this.loader.emit('patches');
+    const pm = this.byPtr.get(p.method.ptr);
     if (pm) {
       pm.remove(p);
       if (!pm.patches.length) { pm.restore(); this.byPtr.delete(pm.ptr); }
@@ -109,9 +116,9 @@ class PatchedMethod {
     this.method = m;
     this.ptr = ptr;
     this.patches = [];
-    this.isStatic = (m.flags & METHOD.STATIC) !== 0;
-    this.params = il.params(m);
-    this.retType = il.typePtr(m.returnType);
+    this.isStatic = m.isStatic;
+    this.params = m.params;
+    this.retType = m.retType;
     this.ret = il.abi(this.retType);
     this.argAbi = this.params.map((p) => il.abi(p.type));
     for (const a of [this.ret, ...this.argAbi]) if (a.wasm === 'unsupported') throw new Error(`patch: unsupported signature (${a.why})`);
@@ -143,9 +150,11 @@ class PatchedMethod {
   call(raw) {
     const ctx = new HookContext(this, raw);
     const loader = this.patcher.loader;
+    const callerMi = raw[raw.length - 1] >>> 0;
+    const applies = (p) => p.active && (!p.mi || !callerMi || callerMi === p.mi);
     let run = true;
     for (const p of this.patches) {
-      if (!p.prefix || !p.active) continue;
+      if (!p.prefix || !applies(p)) continue;
       p.calls++;
       try {
         if (p.prefix.call(p.owner, ctx) === false) run = false;
@@ -154,7 +163,7 @@ class PatchedMethod {
     if (run && !ctx.skipOriginal) ctx.raw = this.original(...ctx.args);
     else if (this.ret.wasm === 'ptr' && ctx._resultSet === false) { /* sret buffer stays zeroed */ }
     for (const p of this.patches) {
-      if (!p.postfix || !p.active) continue;
+      if (!p.postfix || !applies(p)) continue;
       if (!p.prefix) p.calls++;
       try { p.postfix.call(p.owner, ctx); } catch (e) { this._fail(p, 'postfix', e); }
     }
@@ -194,7 +203,7 @@ class HookContext {
     const k = il.klassOf(this.self);
     const td = il.tdOfKlass(k);
     // value-type methods get the unboxed data, not an object
-    if (td >= 0 && il.md.typeDef(this._pm.method.declaringType).isValueType) return null;
+    if (td >= 0 && this._pm.method.declTd >= 0 && il.md.typeDef(this._pm.method.declTd).isValueType) return null;
     return this.loader.interop.wrap(this.self);
   }
   get argCount() { return this._pm.params.length; }

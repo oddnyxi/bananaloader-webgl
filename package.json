@@ -1,6 +1,6 @@
 {
   "name": "bananaloader",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A MelonLoader-style mod loader for Unity WebGL (IL2CPP) games. Mods (Banans) are written in JavaScript.",
   "author": "Nyxi",
   "license": "SEE LICENSE IN LICENSE.md",

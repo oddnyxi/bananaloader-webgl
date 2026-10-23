@@ -14,6 +14,8 @@ import { EditorView } from './editor.js';
 import { VERSION } from '../loader/loader.js';
 import explorerCss from 'bundle-text:../ui/explorer.css';
 import appCss from 'bundle-text:./bananaloader.css';
+import apiDts from 'bundle-text:../loader/bananaloader.d.ts';
+import { TypeGen } from '../loader/typegen.js';
 
 export class App {
   constructor(loader) {
@@ -70,6 +72,7 @@ export class App {
   // ------------------------------------------------------------------ explorer
 
   get il() { return this.loader.il; }
+  get Module() { return this.loader.Module; }
   get unity() { return this.loader.unity; }
   get fmt() { return this.loader.fmt; }
 
@@ -185,6 +188,35 @@ export class App {
     });
   }
 
+  _typesUi(t) {
+    const L = this.loader;
+    const box = t.createGroup('IntelliSense for Banans', { icon: B.code });
+    box.page.append(h('div.ue-note', { style: { margin: '0' }, html: 'Exports <code>game.d.ts</code> (every type in the chosen assemblies) and <code>bananaloader.d.ts</code> (the Banan API). Put them in a <code>types</code> folder next to your Banans with the <code>jsconfig.json</code>, and VS Code autocompletes <code>Il2Cpp.type(\'UnityEngine.Time\').</code>…' }));
+    let picker = null;
+    let publicOnly = true;
+    const pick = () => {
+      if (!L.il || picker) return;
+      const imgs = L.il.md.images.map((im) => im.name.replace(/\.dll$/, ''));
+      const def = imgs.filter((n) => /^(Assembly-CSharp|UnityEngine\.CoreModule|UnityEngine\.PhysicsModule|UnityEngine\.UI|UnityEngine\.UIModule|UnityEngine\.InputLegacyModule|UnityEngine\.AnimationModule|UnityEngine\.AudioModule|mscorlib)$/.test(n) || /^Assembly-CSharp/.test(n));
+      picker = box.createMultiSelect(imgs, () => {}, { label: 'Assemblies', selected: def, save: false });
+      box.createToggle('Public members only (much smaller)', (v) => { publicOnly = v; }, true, { save: false });
+      const [a, b, c] = box.createColumns(3);
+      a.createButton('game.d.ts', () => {
+        const sel = new Set(picker.getValue());
+        const images = L.il.md.images.map((im, i) => [im.name.replace(/\.dll$/, ''), i]).filter(([n]) => sel.has(n)).map(([, i]) => i);
+        const t0 = performance.now();
+        const gen = new TypeGen(L.il);
+        gen.game = `${L.game.product} (Unity ${L.game.unity})`;
+        const text = gen.generate({ images, publicOnly });
+        this.download('game.d.ts', text);
+        this.notify(`game.d.ts: ${gen.included.size.toLocaleString()} types, ${(text.length / 1048576).toFixed(1)} MB in ${Math.round(performance.now() - t0)} ms`, 'success', 4000);
+      }, { icon: B.download });
+      b.createButton('bananaloader.d.ts', () => this.download('bananaloader.d.ts', apiDts), { icon: B.download });
+      c.createButton('jsconfig.json', () => this.download('jsconfig.json', JSON.stringify({ compilerOptions: { checkJs: true, target: 'ES2022', module: 'commonjs', lib: ['ES2022', 'DOM'], strict: false, noImplicitAny: false }, include: ['*.js', 'types/*.d.ts'] }, null, 2)), { icon: B.download });
+    };
+    if (L.il) pick(); else L.on('stage', pick);
+  }
+
   _settings() {
     const t = this.settingsTab;
     const L = this.loader;
@@ -193,12 +225,16 @@ export class App {
     t.createSection('Loader');
     t.createToggle('Safe mode (load no Banans)', (v) => { S.safeMode = v; save(); this.notify('Takes effect after a page reload', 'info'); }, S.safeMode, { save: false })
       .setTooltip('Starts the game without any Banans, to get past a broken one.');
+    t.createToggle('Direct-call patching', (v) => { S.directCalls = v; save(); this.notify('Takes effect after a page reload', 'info'); }, S.directCalls !== false, { save: false })
+      .setTooltip('Rewrites the game\'s wasm as it loads so patches also catch calls compiled straight into game code.');
     t.createToggle('Unity Explorer tabs', (v) => { S.explorer = v; save(); this.notify('Takes effect after a page reload', 'info'); }, S.explorer, { save: false });
     t.createSection('Explorer');
     const modes = ['Engine types only', 'All types', 'Never (click to get)'];
     const keys = ['engine', 'all', 'none'];
     t.createDropdown(modes, (v) => { S.autoProps = keys[modes.indexOf(v)] || 'engine'; save(); }, { label: 'Evaluate properties automatically', selected: Math.max(0, keys.indexOf(S.autoProps)), save: false });
     t.createToggle('Show property / event accessor methods', (v) => { S.showAccessors = v; save(); }, S.showAccessors, { save: false });
+    t.createSection('TypeScript');
+    this._typesUi(t);
     t.createSection('Data');
     const [a, b] = t.createColumns(2);
     a.createButton('Export all Banans', () => {

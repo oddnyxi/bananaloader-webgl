@@ -65,6 +65,22 @@ export class Banan {
   /** A keyboard shortcut ('F5', 'Ctrl+K'), removed on unload. Works while the game has focus. */
   onKey(spec, fn) { return this.loader.app.bindKey(this, spec, fn); }
 
+  /**
+   * Another Banan's API (its `api` property, or the instance itself). Declare it with
+   * `// @require Name` so it loads first; throws if it isn't loaded.
+   */
+  require(name) {
+    const e = this.loader._entry(name);
+    if (!e || e.state !== 'loaded') throw new Error(`${this.info.name} requires ${name}, which isn't loaded`);
+    return e.instance.api !== undefined ? e.instance.api : e.instance;
+  }
+
+  /** Like require(), but returns null when the Banan isn't there (`// @optional Name`). */
+  optional(name) {
+    const e = this.loader._entry(name);
+    return e && e.state === 'loaded' ? (e.instance.api !== undefined ? e.instance.api : e.instance) : null;
+  }
+
   /** A toast in the loader window. */
   notify(text, type = 'info') { this.loader.app.notify(text, type); }
 
@@ -87,7 +103,7 @@ export function parseHeader(source) {
     const x = /^\s*\/\/\s*@(\w+)\s+(.+?)\s*$/.exec(line);
     if (!x) continue;
     const k = x[1].toLowerCase();
-    if (k === 'game' || k === 'require') (info[k] ||= []).push(x[2]);
+    if (k === 'game' || k === 'require' || k === 'optional') (info[k] ||= []).push(x[2]);
     else info[k] = x[2];
   }
   return info;

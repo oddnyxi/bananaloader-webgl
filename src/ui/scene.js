@@ -3,6 +3,7 @@ import { h, icon, mark, debounce, splitter } from './dom.js';
 import { I } from './icons.js';
 import { VList } from './vlist.js';
 import { Inspector } from './inspector.js';
+import { Picker } from './picker.js';
 
 export class SceneView {
   constructor(app) {
@@ -18,6 +19,8 @@ export class SceneView {
     this.search.addEventListener('input', debounce(() => { this.query = this.search.value.trim(); this.flatten(); }, 120));
     this.hidBtn = h('button.ue-ib', { title: 'Show hidden / internal objects', html: I.eyeOff, on: { click: () => { this.showHidden = !this.showHidden; this.hidBtn.classList.toggle('on', this.showHidden); this.hidBtn.innerHTML = this.showHidden ? I.eye : I.eyeOff; this.flatten(); } } });
     this.refreshBtn = h('button.ue-ib', { title: 'Refresh hierarchy', html: I.refresh, on: { click: () => this.refresh() } });
+    this.picker = new Picker(app, { onPick: (go) => { this.refresh(); this.select(go); app.ui.show(); } });
+    this.pickBtn = h('button.ue-ib', { title: 'Pick an object in the game (click it)', html: I.target, on: { click: () => this.picker.start() } });
     this.count = h('span.ue-count');
     this.list = new VList({
       rowHeight: 24,
@@ -30,7 +33,7 @@ export class SceneView {
       onChange: () => this.refresh(true),
     });
     const left = h('div.ue-pane.ue-left',
-      h('div.ue-bar', h('div.ue-search', { html: I.search }, this.search), this.hidBtn, this.refreshBtn),
+      h('div.ue-bar', h('div.ue-search', { html: I.search }, this.search), this.pickBtn, this.hidBtn, this.refreshBtn),
       this.list.el,
       h('div.ue-bar.ue-sub', this.count));
     const gut = h('div.ue-gut');

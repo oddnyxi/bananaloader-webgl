@@ -2,7 +2,10 @@
 //  1. capture the Emscripten Module when the framework assigns Module.asm
 //  2. keep keystrokes typed into the explorer away from the game's key handlers
 
-const state = { Module: null, waiters: [] };
+import { rewriteDirectCalls } from './loader/wasmrewrite.js';
+
+const state = { Module: null, waiters: [], wasm: null };
+const PLAN_PREFIX = 'bananaloader:direct:';
 const HOST_ID = 'unity-explorer-host';
 
 function found(M) {
@@ -30,7 +33,10 @@ export function installHooks() {
     }
   } catch (_) { /* ignore */ }
 
-  // ---- 2. key shield
+  // ---- 2. direct-call patching: rewrite the game's wasm before it compiles (see wasmrewrite.js)
+  installWasmHook();
+
+  // ---- 3. key shield
   const P = EventTarget.prototype;
   if (!P.__ueAdd) {
     const add = P.addEventListener;
@@ -63,6 +69,69 @@ export function installHooks() {
 }
 
 export const EXPLORER_HOST_ID = HOST_ID;
+
+/** Saved list of table slots whose direct calls should be rewritten, per game build. */
+export function readPlan(key) {
+  try { return JSON.parse(localStorage.getItem(PLAN_PREFIX + key) || 'null'); } catch (_) { return null; }
+}
+export function writePlan(key, plan) {
+  try {
+    if (plan && plan.slots.length) localStorage.setItem(PLAN_PREFIX + key, JSON.stringify(plan));
+    else localStorage.removeItem(PLAN_PREFIX + key);
+  } catch (_) { /* ignore */ }
+}
+
+function installWasmHook() {
+  const W = WebAssembly;
+  if (W.__bananaHooked) return;
+  W.__bananaHooked = true;
+  const origStreaming = W.instantiateStreaming;
+  const origInstantiate = W.instantiate;
+  const disabled = () => { try { return JSON.parse(localStorage.getItem('bananaloader:settings') || '{}').directCalls === false || JSON.parse(localStorage.getItem('bananaloader:settings') || '{}').safeMode === true; } catch (_) { return false; } };
+  const big = (n) => n > 4 << 20; // only the game module, not tiny helper modules
+
+  const apply = (bytes, key) => {
+    const info = { key, byteLength: bytes.length, applied: [], sites: 0, ms: 0, error: null };
+    state.wasm = info;
+    const plan = disabled() ? null : readPlan(key);
+    // Rewriting is always semantically safe (a call through slot S still reaches the function
+    // in S), so a plan from an older build only costs a few useless indirect calls.
+    if (!plan || !plan.slots || !plan.slots.length) return bytes;
+    const t0 = performance.now();
+    try {
+      const r = rewriteDirectCalls(bytes, plan.slots);
+      info.applied = plan.slots.filter((x) => !r.missing.includes(x));
+      info.sites = r.sites;
+      info.ms = Math.round(performance.now() - t0);
+      return r.bytes;
+    } catch (e) {
+      info.error = String(e && e.message || e);
+      return bytes;
+    }
+  };
+
+  if (origStreaming) {
+    W.instantiateStreaming = async function (source, imports) {
+      const resp = await source;
+      let key = '';
+      try { key = 'url:' + new URL(resp.url, location.href).pathname; } catch (_) { /* ignore */ }
+      const plan = key && !disabled() ? readPlan(key) : null;
+      if (!plan) {
+        const len = +resp.headers.get('content-length') || 0;
+        if (key && (!len || big(len))) state.wasm = { key, byteLength: len, applied: [], sites: 0, streaming: true };
+        return origStreaming.call(this, resp, imports);
+      }
+      const bytes = new Uint8Array(await resp.arrayBuffer());
+      return origInstantiate.call(this, apply(bytes, key), imports);
+    };
+  }
+  W.instantiate = function (src, imports) {
+    if (src instanceof W.Module) return origInstantiate.call(this, src, imports);
+    const bytes = src instanceof Uint8Array ? src : ArrayBuffer.isView(src) ? new Uint8Array(src.buffer, src.byteOffset, src.byteLength) : new Uint8Array(src);
+    if (!big(bytes.length)) return origInstantiate.call(this, src, imports);
+    return origInstantiate.call(this, apply(bytes, 'buf:' + bytes.length), imports);
+  };
+}
 
 /** Look for an already-running Unity instance (script injected after the game loaded). */
 export function findModuleInPage() {

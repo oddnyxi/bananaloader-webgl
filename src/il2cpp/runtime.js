@@ -237,6 +237,7 @@ export class Il2Cpp {
   }
 
   params(method) {
+    if (method && method.__desc) return method.params;
     const out = [];
     for (let k = 0; k < method.parameterCount; k++) {
       const p = this.md.param(method.parameterStart + k);
@@ -286,6 +287,190 @@ export class Il2Cpp {
       }
     }
     return null;
+  }
+
+  // ------------------------------------------------------------------ callable descriptors
+  //
+  // Everything that calls or patches a method goes through a descriptor:
+  //   { __desc, name, label, ptr, isStatic, flags, params: [{ name, type }], retType, mi, meta, declTd, generic }
+  // Metadata methods get one with mi = 0; runtime MethodInfo* (generic instances) carry real types and mi.
+
+  desc(m) {
+    if (!m) return null;
+    if (m.__desc) return m;
+    if (m._desc) return m._desc;
+    const declTd = m.declaringType;
+    const generic = m.genericContainerIndex !== -1 || this.md.typeDef(declTd).isGeneric;
+    const d = {
+      __desc: true,
+      name: m.name,
+      label: `${this.tdFullName(declTd)}::${m.name}`,
+      ptr: this.methodPointer(m),
+      isStatic: (m.flags & METHOD.STATIC) !== 0,
+      flags: m.flags,
+      params: this.params(m),
+      retType: this.typePtr(m.returnType),
+      mi: 0,
+      meta: m,
+      declTd,
+      generic,
+      parameterCount: m.parameterCount,
+    };
+    m._desc = d;
+    return d;
+  }
+
+  /** Descriptor for a runtime MethodInfo* (works for generic instances: types are inflated). */
+  miDesc(mi, meta) {
+    const m = this.mem;
+    const L = this.layout.mi;
+    const k = m.u32At(mi + L.klass);
+    const n = m.u8At(mi + L.count);
+    const pp = m.u32At(mi + L.params);
+    const params = [];
+    const metaParams = meta ? this.params(meta) : [];
+    for (let i = 0; i < n; i++) params.push({ name: metaParams[i] ? metaParams[i].name : `arg${i}`, type: m.u32At(pp + i * 4) });
+    const flags = m.u16At(mi + L.flags);
+    const name = m.cstr(m.u32At(mi + L.name), 512);
+    return {
+      __desc: true,
+      name,
+      label: `${this.klassName(k)}::${name}`,
+      ptr: m.u32At(mi + L.ptr),
+      isStatic: (flags & METHOD.STATIC) !== 0,
+      flags,
+      params,
+      retType: m.u32At(mi + L.ret),
+      mi,
+      meta: meta || null,
+      klass: k,
+      declTd: this.tdOfKlass(k),
+      generic: false,
+      parameterCount: n,
+    };
+  }
+
+  // ------------------------------------------------------------------ generics
+
+  /** Managed System.Type[] from Il2CppType*s. */
+  typeArray(types) {
+    if (!this._arrCreate) {
+      this._arrCreate = this.findMethod('System.Array', 'CreateInstance', ['System.Type', 'System.Int32']);
+      if (!this._arrCreate) throw new Error('Array.CreateInstance(Type, int) is not available in this build');
+    }
+    const arr = this.call(this._arrCreate, 0, this.typeObjectOfTd(this.findType('System.Type')), types.length);
+    for (let i = 0; i < types.length; i++) this.mem.setU32(arr + 16 + i * 4, this.typeObject(types[i]));
+    return arr;
+  }
+
+  /** Il2CppType* for a type name, supporting generic syntax: "System.Collections.Generic.List<System.Int32>". */
+  resolveTypeName(name) {
+    name = name.trim();
+    const PRIM = { int: 'System.Int32', uint: 'System.UInt32', long: 'System.Int64', ulong: 'System.UInt64', short: 'System.Int16', ushort: 'System.UInt16', byte: 'System.Byte', sbyte: 'System.SByte', float: 'System.Single', double: 'System.Double', bool: 'System.Boolean', char: 'System.Char', string: 'System.String', object: 'System.Object' };
+    if (PRIM[name]) name = PRIM[name];
+    if (name.endsWith('[]')) {
+      const el = this.resolveTypeName(name.slice(0, -2));
+      const t = this.call(this.findMethod('System.RuntimeType', 'MakeArrayType', 0) || this.findMethod('System.Type', 'MakeArrayType', 0), this.typeObject(el));
+      return this._typeOfTypeObject(t);
+    }
+    const lt = name.indexOf('<');
+    if (lt < 0) {
+      const td = this.findType(name);
+      if (td < 0) throw new Error(`type ${name} not found`);
+      return this.typePtr(this.md.typeDef(td).byvalTypeIndex);
+    }
+    const base = name.slice(0, lt);
+    const args = splitGenericArgs(name.slice(lt + 1, name.lastIndexOf('>')));
+    let td = this.findType(`${base}\`${args.length}`);
+    if (td < 0) td = this.findType(base);
+    if (td < 0) throw new Error(`generic type ${base} not found`);
+    return this.makeGenericType(td, args.map((a) => this.resolveTypeName(a)));
+  }
+
+  _typeOfTypeObject(t) {
+    // RuntimeType._impl (RuntimeTypeHandle { IntPtr value }) -> Il2CppType*
+    const f = this.allFields(this.klassOf(t)).find((x) => x.name === '_impl' || x.name === 'm_handle');
+    if (!f) throw new Error('RuntimeType has no _impl field');
+    return this.mem.u32At(t + f.offset);
+  }
+
+  /** Il2CppType* of Def<args...> (creates the runtime class). */
+  makeGenericType(td, argTypes) {
+    const key = td + ':' + argTypes.join(',');
+    this._gtypes ||= new Map();
+    if (this._gtypes.has(key)) return this._gtypes.get(key);
+    const mk = this.findMethod('System.RuntimeType', 'MakeGenericType', 1);
+    if (!mk) throw new Error('Type.MakeGenericType is not available in this build');
+    const t = this.call(mk, this.typeObjectOfTd(td), this.typeArray(argTypes));
+    const p = this._typeOfTypeObject(t);
+    this._gtypes.set(key, p);
+    return p;
+  }
+
+  /** Il2CppClass* for any Il2CppType* (generic instances included). */
+  klassOfType(p) {
+    const t = this.typeInfo(p);
+    if (t.kind === T.GENERICINST) {
+      let k = this.cachedClass(p);
+      if (!k) { this.typeObject(p); k = this.cachedClass(p); }
+      if (!k) {
+        // force class creation through RuntimeHelpers.RunClassConstructor
+        const rc = this.findMethod('System.Runtime.CompilerServices.RuntimeHelpers', 'RunClassConstructor', 1);
+        if (rc) { try { this.invokeRaw(rc, 0, [p]); } catch (_) { /* ignore */ } }
+        k = this.cachedClass(p);
+      }
+      return k;
+    }
+    const td = this.tdOfType(p);
+    return td >= 0 ? this.ensureClass(td) : 0;
+  }
+
+  /**
+   * Inflate a generic method definition: GetComponent<T> -> GetComponent<Rigidbody>.
+   * Goes through reflection (MethodInfo.MakeGenericMethod), which hands back a runtime
+   * MethodInfo* with resolved code and the context shared generic code needs.
+   */
+  inflateMethod(meta, argTypes) {
+    const key = meta.index + ':' + argTypes.join(',');
+    this._ginfl ||= new Map();
+    if (this._ginfl.has(key)) return this._ginfl.get(key);
+    const declTd = meta.declaringType;
+    if (this.md.typeDef(declTd).isGeneric) throw new Error('generic methods of generic types: call them on an instance');
+    const k = this.ensureClass(declTd);
+    const local = meta.index - this.md.typeDef(declTd).methodStart;
+    const arr = k && this.layout.methods !== undefined ? this.mem.u32At(k + this.layout.methods) : 0;
+    const defMi = arr ? this.mem.u32At(arr + local * 4) : 0;
+    if (!this.mem.valid(defMi)) throw new Error(`no runtime MethodInfo for ${meta.name} (class not set up)`);
+    const fromHandle = this.findMethod('System.Reflection.MethodBase', 'GetMethodFromHandle', 1);
+    const make = this.findMethod('System.Reflection.RuntimeMethodInfo', 'MakeGenericMethod', 1);
+    if (!fromHandle || !make) throw new Error('reflection (MethodBase.GetMethodFromHandle / MakeGenericMethod) is not available in this build');
+    const rmi = this.call(fromHandle, 0, defMi);
+    const inst = this.call(make, rmi, this.typeArray(argTypes));
+    const f = this.allFields(this.klassOf(inst)).find((x) => x.name === 'mhandle');
+    if (!f) throw new Error('RuntimeMethodInfo.mhandle not found');
+    const mi = this.mem.u32At(inst + f.offset);
+    const d = this.miDesc(mi, meta);
+    d.label = `${this.tdFullName(declTd)}::${meta.name}<${argTypes.map((t) => this.typeName(t)).join(', ')}>`;
+    if (!d.ptr) throw new Error(`${d.label} has no code in this build (that instantiation was never compiled)`);
+    this._ginfl.set(key, d);
+    return d;
+  }
+
+  /** Runtime methods of a class (index i matches metadata method i of its definition). */
+  runtimeMethods(k) {
+    const L = this.layout;
+    if (L.methods === undefined || !k) return [];
+    const arr = this.mem.u32At(k + L.methods);
+    if (!this.mem.valid(arr)) return [];
+    const td = this.tdOfKlass(k);
+    const metas = td >= 0 ? this.methodsOf(td) : [];
+    const out = [];
+    for (let i = 0; i < metas.length; i++) {
+      const mi = this.mem.u32At(arr + i * 4);
+      if (!this.mem.valid(mi)) continue;
+      out.push(this.miDesc(mi, metas[i]));
+    }
+    return out;
   }
 
   /** wasm table index of a method's code, or 0 (abstract, stripped, generic). */
@@ -370,6 +555,16 @@ export class Il2Cpp {
       const v = m.u32At(p + empty.offset);
       if (m.valid(v) && m.u32At(v) === K && m.i32At(v + 8) === 0) { L.staticFields = o; break; }
     }
+    // methods -> MethodInfo*[] { methodPointer, virtualMethodPointer, invoker, name, klass, return_type, parameters, ... }
+    const firstMethod = this.methodsOf(strTd)[0];
+    const mName = md.strAddr(firstMethod.nameIndex);
+    for (let o = L.fields; o < 200; o += 4) {
+      const arr = m.u32At(K + o);
+      if (!m.valid(arr)) continue;
+      const mi = m.u32At(arr);
+      if (m.valid(mi) && m.u32At(mi + 12) === mName && m.u32At(mi + 16) === K) { L.methods = o; break; }
+    }
+    L.mi = { ptr: 0, vptr: 4, invoker: 8, name: 12, klass: 16, ret: 20, params: 24, token: 36, flags: 40, slot: 44, count: 46 };
     // Class table: Il2CppClass*[typeCount] indexed by type definition. Every String object also
     // starts with K, so a candidate only counts if a sample of its entries all name their typedef.
     m.views();
@@ -574,6 +769,12 @@ export class Il2Cpp {
 
   /** Can this method be called directly? Returns null or a reason string. */
   whyNotCallable(m) {
+    if (m.__desc) {
+      if (m.generic) return m.meta && m.meta.genericContainerIndex !== -1 ? 'generic method (use .of(...types))' : 'method of a generic type (call it on an instance)';
+      if (!m.ptr) return 'no code in this build';
+      for (const t of [m.retType, ...m.params.map((p) => p.type)]) { const a = this.abi(t); if (a.wasm === 'unsupported') return a.why; }
+      return null;
+    }
     if (m.genericContainerIndex !== -1) return 'generic method';
     const td = this.md.typeDef(m.declaringType);
     if (td.isGeneric) return 'method of a generic type';
@@ -595,10 +796,11 @@ export class Il2Cpp {
    * @returns       { value, retAddr } — retAddr is set for struct returns (caller frees with free())
    */
   invokeRaw(m, self, args) {
-    const ptr = this.methodPointer(m);
-    if (!ptr) throw new Error(`${m.name}: no code (${this.whyNotCallable(m)})`);
-    const isStatic = (m.flags & METHOD.STATIC) !== 0;
-    const ret = this.abi(this.typePtr(m.returnType));
+    const d = this.desc(m);
+    const ptr = d.ptr;
+    if (!ptr) throw new Error(`${d.name}: no code (${this.whyNotCallable(d)})`);
+    const isStatic = d.isStatic;
+    const ret = this.abi(d.retType);
     const f = this.fn(ptr);
     const list = [];
     let retAddr = 0;
@@ -609,7 +811,7 @@ export class Il2Cpp {
     }
     if (!isStatic) list.push(self >>> 0);
     list.push(...args);
-    list.push(0); // const MethodInfo*
+    list.push(d.mi >>> 0); // const MethodInfo* (needed by shared generic code)
     if (f.length !== list.length) {
       if (retAddr) this.free(retAddr);
       throw new Error(`${m.name}: signature mismatch (expected ${list.length} wasm params, function takes ${f.length})`);
@@ -621,7 +823,7 @@ export class Il2Cpp {
       if (retAddr) this.free(retAddr);
       throw e;
     }
-    return { value, retAddr, ret };
+    return { value, retAddr, ret, retType: d.retType };
   }
 
   /** Convenience: call with plain JS values (numbers, booleans, strings, pointers). */
@@ -653,11 +855,7 @@ export class Il2Cpp {
         if (!this.typeInfo(p.type).byref) return;
         const buf = args[i];
         const t = this.typeInfo(p.type);
-        let v;
-        if (t.kind === T.VALUETYPE && !this.md.typeDef(this._tdFromData(t.data)).isEnum) v = this.readStruct(buf, this._tdFromData(t.data));
-        else v = this.readValue(buf, p.type);
-        if (t.kind === T.STRING) v = this.readString(v);
-        outs.push({ name: p.name, type: p.type, value: v });
+        outs.push({ name: p.name, type: p.type, value: this.readDeep(buf, p.type) });
       });
       return { value, outs };
     } finally {
@@ -703,10 +901,10 @@ export class Il2Cpp {
     }
   }
 
-  unmarshalReturn({ value, retAddr, ret }) {
+  unmarshalReturn({ value, retAddr, ret, retType }) {
     if (ret.wasm === 'void') return undefined;
     if (ret.wasm === 'ptr') {
-      const out = this.readStruct(retAddr, ret.td);
+      const out = retType ? this.readDeep(retAddr, retType) : this.readStruct(retAddr, ret.td);
       this.free(retAddr);
       return out;
     }
@@ -896,6 +1094,24 @@ export class Il2Cpp {
     return null;
   }
 
+  /** Read a value as plain JS: structs (nested too) become objects, strings JS strings, references stay addresses. */
+  readDeep(addr, p, depth = 0) {
+    const t = this.typeInfo(p);
+    if (t.kind === T.STRING) return this.readString(this.mem.u32At(addr));
+    if (t.kind === T.VALUETYPE || t.kind === T.GENERICINST) {
+      if (t.kind === T.VALUETYPE && this.md.typeDef(this._tdFromData(t.data)).isEnum) return this.readValue(addr, p);
+      if (t.kind === T.GENERICINST) { const b = this.tdOfType(p); if (!(b >= 0 && this.md.typeDef(b).isValueType)) return this.mem.u32At(addr); }
+      const fs = this.fieldsOfStructType(p);
+      if (fs && depth < 8) {
+        const o = {};
+        for (const f of fs) o[f.name] = this.readDeep(addr + f.offset, f.type, depth + 1);
+        return o;
+      }
+      if (t.kind === T.GENERICINST) return this.mem.u32At(addr);
+    }
+    return this.readValue(addr, p);
+  }
+
   /** Instance fields of a value type definition with offsets relative to the unboxed data. */
   structFields(td) {
     return this.fieldsOf(td)
@@ -1039,4 +1255,19 @@ export class Il2Cpp {
 
   /** Il2CppObject boxed value -> address of its data. */
   unbox(obj) { return obj + 8; }
+}
+
+/** "A, B<C, D>, E" -> ["A", "B<C, D>", "E"] */
+export function splitGenericArgs(s) {
+  const out = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of s) {
+    if (ch === '<') depth++;
+    if (ch === '>') depth--;
+    if (ch === ',' && depth === 0) { out.push(cur.trim()); cur = ''; continue; }
+    cur += ch;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
 }
