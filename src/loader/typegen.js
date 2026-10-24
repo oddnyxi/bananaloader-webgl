@@ -116,11 +116,7 @@ export class TypeGen {
     const il = this.il;
     const d = il.md.typeDef(t);
     if (!d.isGeneric) return [];
-    const c = il.md.sec.genericContainers.off + d.genericContainerIndex * 16;
-    const argc = il.mem.i32At(c + 4);
-    const start = il.mem.i32At(c + 12);
-    const names = [];
-    for (let k = 0; k < argc; k++) names.push(seg(il.md.str(il.mem.u32At(il.md.sec.genericParameters.off + (start + k) * 16 + 4))));
+    const names = il.md.genericParamNames(d.genericContainerIndex).map(seg);
     return names;
   }
 

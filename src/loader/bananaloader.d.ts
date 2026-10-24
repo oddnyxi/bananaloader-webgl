@@ -291,6 +291,8 @@ declare const BananaLoader: {
   patch(target: string, hooks: BananPatchHooks): BananPatch;
   install(source: string, o?: { origin?: string; url?: string; file?: string }): Promise<any>;
   installFromUrl(url: string): Promise<any>;
+  /** Odium Dumper output from the running game (dump.cs, named wasm, script.json, …). */
+  dump(o?: { named?: boolean; metadata?: boolean }): Promise<{ files: { name: string; data: Uint8Array | string }[]; summary: Record<string, number>; wasm: boolean }>;
   /** Delete an installed Banan (not folder Banans). */
   uninstall(name: string): Promise<void>;
   on(event: 'banans' | 'stage' | 'scenes' | 'patches' | 'frame' | 'unload', fn: (...a: any[]) => void): void;

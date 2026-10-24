@@ -16,6 +16,8 @@ import explorerCss from 'bundle-text:../ui/explorer.css';
 import appCss from 'bundle-text:./bananaloader.css';
 import apiDts from 'bundle-text:../loader/bananaloader.d.ts';
 import { TypeGen } from '../loader/typegen.js';
+import { liveDump, liveMetadata, zip } from '../dumper/live.js';
+import { download as saveFile } from '../dumper/zip.js';
 
 export class App {
   constructor(loader) {
@@ -217,6 +219,35 @@ export class App {
     if (L.il) pick(); else L.on('stage', pick);
   }
 
+  _dumpUi(t) {
+    const L = this.loader;
+    const box = t.createGroup('IL2CPP dump', { icon: B.code });
+    box.page.append(h('div.ue-note', { style: { margin: '0' }, html: 'Everything Odium Dumper makes, from the running game: <code>dump.cs</code>, a <code>.wasm</code> with C# function names (for DevTools and Ghidra), <code>script.json</code>, <code>methods.json</code> and <code>global-metadata.dat</code>, as one zip. Use it when a game has no <code>.data</code> file to dump offline.' }));
+    let named = true;
+    box.createToggle('Named .wasm (downloads the game\'s wasm again)', (v) => { named = v; }, true, { save: false });
+    const [a, b] = box.createColumns(2);
+    let busy = false;
+    a.createButton('Dump game (.zip)', async () => {
+      if (!L.il) return this.notify('IL2CPP isn\'t ready yet', 'warn');
+      if (busy) return;
+      busy = true;
+      const t0 = performance.now();
+      this.notify('Dumping… the game may pause for a few seconds', 'info', 3000);
+      try {
+        const r = await liveDump(L.il, { named, log: (m) => L.log.debug && L.log.debug(m) });
+        const name = (L.game.product || document.title || location.hostname || 'game').replace(/[^\w.-]+/g, '_');
+        saveFile(`${name}-dump.zip`, zip(r.files), 'application/zip');
+        this.notify(`Dumped ${r.summary.types.toLocaleString()} types in ${((performance.now() - t0) / 1000).toFixed(1)} s${r.wasm ? '' : ' (no wasm: function indices and names left out)'}`, 'success', 5000);
+      } catch (e) {
+        this.notify('Dump failed: ' + (e.message || e), 'error');
+      } finally { busy = false; }
+    }, { icon: B.download });
+    b.createButton('global-metadata.dat', () => {
+      if (!L.il) return this.notify('IL2CPP isn\'t ready yet', 'warn');
+      saveFile('global-metadata.dat', liveMetadata(L.il));
+    }, { icon: B.download });
+  }
+
   _settings() {
     const t = this.settingsTab;
     const L = this.loader;
@@ -235,6 +266,8 @@ export class App {
     t.createToggle('Show property / event accessor methods', (v) => { S.showAccessors = v; save(); }, S.showAccessors, { save: false });
     t.createSection('TypeScript');
     this._typesUi(t);
+    t.createSection('Dumper');
+    this._dumpUi(t);
     t.createSection('Data');
     const [a, b] = t.createColumns(2);
     a.createButton('Export all Banans', () => {

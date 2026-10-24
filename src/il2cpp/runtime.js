@@ -134,13 +134,7 @@ export class Il2Cpp {
     return out;
   }
 
-  _genericParamName(d) {
-    const md = this.md;
-    const sec = md.sec.genericParameters;
-    const addr = d < sec.size / 16 ? sec.off + d * 16 : d;
-    if (addr < sec.off || addr >= sec.off + sec.size) return 'T';
-    return md.str(this.mem.u32At(addr + 4));
-  }
+  _genericParamName(d) { return this.md.genericParamName(d); }
 
   tdFullName(i, arity = false) {
     const t = this.md.typeDef(i);
@@ -155,15 +149,7 @@ export class Il2Cpp {
   tdShortName(i) {
     const t = this.md.typeDef(i);
     let n = t.name.replace(/`\d+$/, '');
-    if (t.isGeneric) {
-      const gc = this.md.sec.genericContainers;
-      const c = gc.off + t.genericContainerIndex * 16;
-      const argc = this.mem.i32At(c + 4);
-      const start = this.mem.i32At(c + 12);
-      const names = [];
-      for (let k = 0; k < argc; k++) names.push(this.md.str(this.mem.u32At(this.md.sec.genericParameters.off + (start + k) * 16 + 4)));
-      n += '<' + names.join(', ') + '>';
-    }
+    if (t.isGeneric) n += '<' + this.md.genericParamNames(t.genericContainerIndex).join(', ') + '>';
     return n;
   }
 

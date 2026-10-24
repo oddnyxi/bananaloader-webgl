@@ -14,6 +14,7 @@ import { Store } from './store.js';
 import { Coroutines } from './coroutines.js';
 import { Overlay } from './overlay.js';
 import { TypeGen } from './typegen.js';
+import { liveDump } from '../dumper/live.js';
 
 export const VERSION = '1.1.0';
 const SETTINGS_KEY = 'bananaloader:settings';
@@ -605,6 +606,8 @@ export class BananaLoader {
       },
       logger: (name, color) => self.hub.logger(name, color),
       patch: (target, hooks) => self.patcher.patch(null, target, hooks),
+      /** Odium Dumper output from the running game: { files: [{ name, data }], summary }. */
+      dump: (o = {}) => { if (!self.il) throw new Error('IL2CPP is not ready'); return liveDump(self.il, o); },
       /** TypeScript definitions for the game: generateTypes({ assemblies: ['Assembly-CSharp', ...], publicOnly }) */
       generateTypes: (o = {}) => {
         const il = self.il;
