@@ -33,13 +33,16 @@ export function staticIl2Cpp(image, metadata, log = () => {}) {
   il.mem = new Memory({ buffer: buf });
   il.md = new Metadata(il.mem, metaAt);
   il.md._declTd = (typeIndex) => il.tdOfTypeIndex(typeIndex);
-  log(`metadata v${il.md.version}: ${il.md.images.length} assemblies, ${il.md.typeCount} types, ${il.md.methodCount} methods`);
+  log(`metadata v${il.md.versionLabel}: ${il.md.images.length} assemblies, ${il.md.typeCount} types, ${il.md.methodCount} methods`);
   const reg = findRegistrations(il.mem, il.md, metaAt);
   if (!reg.meta) throw new Error('Il2CppMetadataRegistration not found in the data segments');
-  if (!reg.modules.size) throw new Error('Il2CppCodeRegistration not found in the data segments');
+  if (!reg.modules.size && !reg.flat) throw new Error('Il2CppCodeRegistration not found in the data segments');
   il.reg = reg;
   il.moduleOfImage = il.md.images.map((img) => reg.modules.get(img.name) || null);
   il._indexTypes();
+  il.byrefBit = 29;
+  il._detectTypeBits();
+  il.i64Mode = 'unknown';
   il.ready = true;
   il.static = true;
   log(`registrations: ${reg.meta.typesCount} types, ${reg.modules.size} code modules`);
@@ -58,6 +61,12 @@ export class Dumper {
     this.wasm = wasm;
     this.log = log;
     this.table = wasm ? wasm.table() : null;
+    // fastcomp builds: method pointers are relative to per-signature tables (WasmModule.fnTables)
+    if (wasm && !il.fnTables) il.fnTables = wasm.fnTables();
+    this.fnTables = il.fnTables || null;
+    if (wasm && !il.sigs) il.sigs = wasm.slotSignatures();
+    if (this.fnTables && !il.flavor) il.flavor = 'fastcomp'; // struct ABI + slot resolution
+    if (this.fnTables && il.staticThis === undefined) il._detectStaticThis();
     this._codeReg();
   }
 
@@ -65,9 +74,15 @@ export class Dumper {
 
   /** Il2CppCodeRegistration fields we need: generic method pointers and invokers. */
   _codeReg() {
-    const il = this.il; const m = this.mem; const md = this.md; const meta = il.reg.meta;
-    this.gmEntry = md.version >= 27 ? 16 : 12;
+    const il = this.il; const m = this.mem; const meta = il.reg.meta;
+    this.gmEntry = this._gmEntrySize();
     this.generic = { pointers: 0, count: 0 };
+    const flat = il.reg.flat;
+    if (flat) {
+      // v24.0/24.1: the code registration starts with the flat method table
+      this.generic = { pointers: flat.genericPointers, count: flat.genericCount, invokers: flat.invokerPointers, invokerCount: flat.invokerCount };
+      return;
+    }
     // highest methodIndex in the generic method table = number of generic method pointers
     let maxIdx = -1;
     for (let i = 0; i < meta.genericMethodTableCount; i++) {
@@ -76,20 +91,73 @@ export class Dumper {
     }
     const at = il.reg.code && il.reg.code.regAddr;
     if (!at) return;
-    // codeGenModules sits 56 bytes into the struct (v24.2 – v29.0), 64 from v29.1
-    // (unresolvedInstanceCallPointers / unresolvedStaticCallPointers were added)
-    for (const back of [64, 56, 48]) {
+    // codeGenModules sits this many bytes into the struct:
+    //   52 (v24.2, v27.0), 56 (v27.1 – v29.0), 60 (v24.3/24.4), 64 (v24.5, v29.1+)
+    for (const back of [64, 56, 60, 52, 48]) {
       const start = at - back;
       const count = m.u32At(start + 8);
       const ptr = m.u32At(start + 12);
       if (count >= maxIdx + 1 && count < maxIdx + 64 && ptr > 0x400 && ptr < m.size) {
-        this.generic = { pointers: ptr, count, start, invokers: m.u32At(start + 24), invokerCount: m.u32At(start + 20) };
+        // invokerPointers follow genericMethodPointers, or genericAdjustorThunks when present
+        let inv = { invokers: 0, invokerCount: 0 };
+        // an invoker array holds small, mostly non-zero function pointers
+        const looksInvokers = (p, c) => {
+          if (!(c > 0 && c < 200000 && p > 0x400 && p + c * 4 <= m.size && p !== ptr)) return false;
+          let ok = 0;
+          for (let k = 0; k < Math.min(c, 32); k++) { const v = m.u32At(p + k * 4); if (v >= 1 << 22) return false; if (v) ok++; }
+          return ok >= Math.min(c, 32) / 2;
+        };
+        for (const o of [20, 16]) {
+          const c = m.u32At(start + o); const p = m.u32At(start + o + 4);
+          if (looksInvokers(p, c)) { inv = { invokers: p, invokerCount: c }; break; }
+        }
+        this.generic = { pointers: ptr, count, start, ...inv };
         return;
       }
     }
   }
 
+  /**
+   * Il2CppGenericMethodFunctionsDefinitions is { genericMethodIndex, methodIndex, invokerIndex }
+   * (12 bytes), plus adjustorThunk in v24.5 and v27.1+ (16 bytes). Pick the stride whose
+   * entries all reference valid method specs.
+   */
+  _gmEntrySize() {
+    const m = this.mem; const meta = this.il.reg.meta;
+    const n = Math.min(meta.genericMethodTableCount, 256);
+    const fits = (size) => {
+      for (let i = 0; i < n; i++) {
+        const e = meta.genericMethodTable + i * size;
+        const spec = m.i32At(e); const idx = m.i32At(e + 4);
+        if (spec < 0 || spec >= meta.methodSpecsCount || idx < -1 || idx > 4e6) return false;
+      }
+      return true;
+    };
+    const pref = this.md.version >= 29 ? [16, 12] : [12, 16];
+    return pref.find(fits) || pref[0];
+  }
+
   slotFunc(slot) { return this.table && slot ? (this.table.get(slot) ?? -1) : -1; }
+
+  /**
+   * fastcomp: the table index of a generic instance's code. Its signature comes from the
+   * definition with T / TKey… replaced by the instantiation's type arguments.
+   */
+  _genericSlot(def, ptr, clsTypes, mthTypes) {
+    const il = this.il; const md = this.md;
+    const sub = (p) => {
+      if (!p) return p;
+      const t = il.typeInfo(p);
+      if (t.kind !== T.VAR && t.kind !== T.MVAR) return p;
+      const num = md.genericParamNum(t.data);
+      return (t.kind === T.VAR ? clsTypes : mthTypes)[num] || p;
+    };
+    const d = {
+      __desc: true, ptr, isStatic: (def.flags & 0x10) !== 0,
+      params: il.params(def).map((x) => ({ name: x.name, type: sub(x.type) })), retType: sub(il.typePtr(def.returnType)),
+    };
+    return il.slotOf(d);
+  }
 
   // ------------------------------------------------------------------ names
 
@@ -122,8 +190,9 @@ export class Dumper {
     for (let td = 0; td < md.typeCount; td++) {
       const tname = il.tdFullName(td);
       for (const m of il.methodsOf(td)) {
-        const slot = il.methodPointer(m);
-        if (!slot) continue;
+        if (!il.methodPointer(m)) continue;
+        const slot = il.slotOf(m);
+        if (!slot) { this.unmapped = (this.unmapped || 0) + 1; continue; }
         const func = this.slotFunc(slot);
         out.push({
           name: `${tname}$$${m.name}`, type: tname, method: m.name, signature: this.methodSignature(m),
@@ -144,21 +213,26 @@ export class Dumper {
     const out = [];
     if (!g.pointers) return out;
     const inst = (idx) => (idx >= 0 && idx < meta.genericInstsCount ? m.u32At(meta.genericInsts + idx * 4) : 0);
-    const args = (p) => (p ? il._genericArgs(p).map((a) => il.typeName(a, false)) : []);
     for (let i = 0; i < meta.genericMethodTableCount; i++) {
       const e = meta.genericMethodTable + i * this.gmEntry;
       const specIdx = m.i32At(e);
       const methodIndex = m.i32At(e + 4);
       if (methodIndex < 0 || methodIndex >= g.count) continue;
-      const slot = m.u32At(g.pointers + methodIndex * 4);
+      let slot = m.u32At(g.pointers + methodIndex * 4);
       if (!slot) continue;
       if (specIdx < 0 || specIdx >= meta.methodSpecsCount) continue;
       const s = meta.methodSpecs + specIdx * 12;
       const defIdx = m.i32At(s);
       if (defIdx < 0 || defIdx >= md.methodCount) continue;
       const def = md.method(defIdx);
-      const cls = args(inst(m.i32At(s + 4)));
-      const mth = args(inst(m.i32At(s + 8)));
+      const clsTypes = inst(m.i32At(s + 4)) ? il._genericArgs(inst(m.i32At(s + 4))) : [];
+      const mthTypes = inst(m.i32At(s + 8)) ? il._genericArgs(inst(m.i32At(s + 8))) : [];
+      if (this.fnTables) {
+        slot = this._genericSlot(def, slot, clsTypes, mthTypes);
+        if (!slot) { this.unmapped = (this.unmapped || 0) + 1; continue; }
+      }
+      const cls = clsTypes.map((a) => il.typeName(a, false));
+      const mth = mthTypes.map((a) => il.typeName(a, false));
       const base = il.tdFullName(def.declaringType);
       const tname = cls.length ? `${base}<${cls.join(', ')}>` : base;
       const mname = mth.length ? `${def.name}<${mth.join(', ')}>` : def.name;
@@ -211,7 +285,8 @@ export class Dumper {
     for (const h of hits) {
       if (!keep.has(h.callee) || seen.has(h.name)) continue;
       seen.add(h.name);
-      out.push({ name: h.name, slot: h.slot, func: this.slotFunc(h.slot) });
+      // fastcomp: the registered pointer is relative to a signature table we can't name here
+      out.push({ name: h.name, slot: h.slot, func: this.fnTables ? -1 : this.slotFunc(h.slot) });
     }
     this.log(`internal calls: ${out.length}`);
     return out;
@@ -243,8 +318,12 @@ export class Dumper {
     // invokers: RuntimeInvoker_<index>
     const g = this.generic;
     if (g.invokers && g.invokerCount < 1e6) {
+      // InvokerMethod(methodPointer, MethodInfo*, obj, args[, ret]): iiiii before 2021.2, viiiii after
+      const it = this.fnTables && (this.fnTables.get('iiiii') || this.fnTables.get('viiiii'));
       for (let i = 0; i < g.invokerCount; i++) {
-        const f = this.slotFunc(this.mem.u32At(g.invokers + i * 4));
+        let p = this.mem.u32At(g.invokers + i * 4);
+        if (this.fnTables) p = it && p ? it.offset + (it.mask === null ? p : p & it.mask) : 0;
+        const f = this.slotFunc(p);
         if (f >= 0 && !names.has(f)) names.set(f, `RuntimeInvoker_${i}`);
       }
     }
@@ -351,7 +430,7 @@ export class Dumper {
     const byIndex = new Map();
     for (const x of this.methods()) { const a = byIndex.get(x.index); if (a) a.push(x); else byIndex.set(x.index, [x]); }
     const parts = [];
-    const head = [`// Odium Dumper · IL2CPP metadata v${md.version}`, `// ${md.images.length} assemblies · ${md.typeCount} types · ${md.methodCount} methods`];
+    const head = [`// Odium Dumper · IL2CPP metadata v${md.versionLabel}`, `// ${md.images.length} assemblies · ${md.typeCount} types · ${md.methodCount} methods`];
     if (this.wasm) head.push('// Slot = index in the wasm function table (methodPointer). Func = wasm function index.');
     for (const img of md.images) head.push(`// Image ${img.index}: ${img.name} - ${img.typeStart}`);
     parts.push(head.join('\n') + '\n');
@@ -456,13 +535,15 @@ export class Dumper {
   summary() {
     const ms = this.methods();
     return {
-      metadataVersion: this.md.version,
+      metadataVersion: this.md.subVersion,
       assemblies: this.md.images.length,
       types: this.md.typeCount,
       methods: this.md.methodCount,
       compiledMethods: ms.filter((x) => !x.generic).length,
       genericInstances: ms.filter((x) => x.generic).length,
       mappedToFunctions: ms.filter((x) => x.func >= 0).length,
+      unmapped: this.unmapped || 0,
+      functionTables: this.fnTables ? this.fnTables.size : 0,
       stringLiterals: this.md.stringLiteralCount,
       internalCalls: this.internalCalls().length,
     };

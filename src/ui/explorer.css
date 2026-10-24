@@ -217,3 +217,39 @@ select.ue-in { padding-right: 4px; }
 
 .ue-loading { display: grid; place-items: center; height: 100%; color: var(--mute); gap: 12px; text-align: center; padding: 24px; }
 .ue-loading .sp { width: 26px; height: 26px; border: 3px solid #2a2a32; border-top-color: var(--red); border-radius: 50%; animation: rot .8s linear infinite; }
+
+/* autocomplete (ui/complete.js) */
+.ac {
+  position: fixed; z-index: 2147483000; pointer-events: auto; min-width: 280px; max-width: min(620px, calc(100vw - 16px));
+  background: #121216; border: 1px solid #2a2a33; border-radius: 9px; box-shadow: 0 14px 40px rgba(0,0,0,.55), 0 0 0 1px rgba(0,0,0,.4);
+  font: 12px/1.35 "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace; color: var(--text, #e6e6ea); overflow: hidden;
+  animation: ac-in .09s ease-out;
+}
+.ac[hidden] { display: none; }
+@keyframes ac-in { from { transform: translateY(3px); } to { transform: none; } }
+.ac-head { padding: 5px 10px; font-size: 10.5px; letter-spacing: .02em; color: var(--mute, #8a8a96); border-bottom: 1px solid #23232b; background: #0e0e11; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ac-head[hidden], .ac-foot[hidden] { display: none; }
+.ac-list { max-height: 238px; overflow-y: auto; padding: 3px; scrollbar-width: thin; }
+.ac-row { display: flex; align-items: center; gap: 8px; height: 23px; padding: 0 7px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.ac-row:hover { background: rgba(255,255,255,.04); }
+.ac-row.on { background: rgba(var(--rgb, 239,68,68), .16); box-shadow: inset 2px 0 0 var(--red, #ef4444); }
+.ac-row.dim .ac-l { opacity: .62; }
+.ac-l { flex: none; color: #ececf1; }
+.ac-l b { color: var(--red-hi, #f87171); font-weight: 700; }
+.ac-d { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: right; color: #6f6f7c; font-size: 11px; }
+.ac-k { flex: none; width: 16px; height: 16px; border-radius: 4px; display: grid; place-items: center; font-size: 10px; font-weight: 700; background: #24242c; color: #a1a1ad; }
+.ac-k.k-field { background: rgba(56,189,248,.16); color: #7dd3fc; }
+.ac-k.k-prop { background: rgba(167,139,250,.18); color: #c4b5fd; }
+.ac-k.k-method, .ac-k.k-fn { background: rgba(250,204,21,.15); color: #fde047; }
+.ac-k.k-const, .ac-k.k-enum, .ac-k.k-enumtype { background: rgba(52,211,153,.15); color: #6ee7b7; }
+.ac-k.k-class, .ac-k.k-struct, .ac-k.k-interface { background: rgba(251,146,60,.16); color: #fdba74; }
+.ac-k.k-ns { background: rgba(148,163,184,.16); color: #cbd5e1; }
+.ac-k.k-helper { background: rgba(var(--rgb, 239,68,68), .16); color: var(--red-hi, #f87171); }
+.ac-foot { padding: 5px 10px; border-top: 1px solid #23232b; background: #0e0e11; color: #9a9aa6; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ac-sig { min-width: 0; padding: 6px 10px; }
+.ac-sigrow { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #b4b4bf; }
+.ac-sigrow + .ac-sigrow { margin-top: 2px; }
+.ac-ret { color: #6f6f7c; }
+.ac-fn { color: #fde047; }
+.ac-on { color: #fff; text-decoration: underline; text-decoration-color: var(--red, #ef4444); text-underline-offset: 3px; }
+.ac-more { color: #6f6f7c; font-size: 10.5px; margin-top: 3px; }

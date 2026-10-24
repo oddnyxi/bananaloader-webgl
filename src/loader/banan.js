@@ -115,11 +115,19 @@ export const slug = (s) => String(s || 'banan').toLowerCase().replace(/[^a-z0-9]
  * Evaluate Banan source. The code sees: module, exports, Banan, BananPlugin, BananaLoader,
  * Il2Cpp, il, unity, logger. It sets module.exports to a class (or an object of callbacks).
  */
-export function compile(source, id, scope) {
+export function compile(source, id, scope, types = null) {
   const module = { exports: {} };
   const names = ['module', 'exports', ...Object.keys(scope)];
-  // eslint-disable-next-line no-new-func
-  const fn = new Function(...names, `"use strict";\n${source}\n//# sourceURL=banan://${id}.js`);
+  let fn;
+  if (types) {
+    // The Banan stays strict; the sloppy wrapper only adds a `with` scope for bare type names
+    // (Camera.main). Scope names and the Banan's own declarations shadow it.
+    // eslint-disable-next-line no-new-func
+    fn = new Function('__types', `with (__types) { return function (${names.join(', ')}) {"use strict";\n${source}\n}; }\n//# sourceURL=banan://${id}.js`)(types);
+  } else {
+    // eslint-disable-next-line no-new-func
+    fn = new Function(...names, `"use strict";\n${source}\n//# sourceURL=banan://${id}.js`);
+  }
   fn(module, module.exports, ...Object.values(scope));
   let ex = module.exports;
   if (ex && typeof ex === 'object' && typeof ex.default === 'function') ex = ex.default;

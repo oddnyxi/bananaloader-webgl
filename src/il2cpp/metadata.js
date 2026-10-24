@@ -1,36 +1,65 @@
-// global-metadata.dat reader (IL2CPP metadata v24.2 – v39), read straight out of the wasm heap
+// global-metadata.dat reader (IL2CPP metadata v24.0 – v39), read straight out of the wasm heap
 // (or out of a static image built by the dumper).
 //
 // The runtime keeps the whole file in memory after loading it, so we find it by its magic
 // and read names, type definitions, methods, fields, parameters and properties from there.
 //
 // Record layouts are computed from the section sizes rather than hardcoded:
-//  * v24.2 – v31 (Unity 2019.4 – 6000.2): (offset, size) section pairs, 32-bit indices.
+//  * v24.0 – v24.1 (Unity 2018.x – 2019.1): an extra rgctxEntries header section, rgctx and
+//    method indices inside the type and method records, and (24.0 only) customAttributeIndex
+//    in most records. Methods find their code through a flat methodPointers array.
+//  * v24.2 – v24.5 (Unity 2019.2 – 2020.1) and v27 (Unity 2020.2 – 2021.1): per-assembly code
+//    modules; v24.x still has byrefTypeIndex in type definitions.
+//  * v29 – v31 (Unity 2021.2 – 6000.2): (offset, size) section pairs, 32-bit indices.
 //  * v38+ (Unity 6000.3+): (offset, size, count) triples, and the TypeIndex,
 //    TypeDefinitionIndex and GenericContainerIndex fields shrink to 2 (or 1) bytes when the
 //    counts allow it. Their widths are worked out from record sizes and cross-checked.
 
 export const SANITY = 0xfab11baf;
 
-// Header section order for v29+ (Unity 2021.2 – 6000.x).
-const SECTIONS_V29 = [
+const COMMON = [
   'stringLiteral', 'stringLiteralData', 'string', 'events', 'properties', 'methods',
   'parameterDefaultValues', 'fieldDefaultValues', 'fieldAndParameterDefaultValueData', 'fieldMarshaledSizes',
   'parameters', 'fields', 'genericParameters', 'genericParameterConstraints', 'genericContainers', 'nestedTypes',
-  'interfaces', 'vtableMethods', 'interfaceOffsets', 'typeDefinitions', 'images', 'assemblies', 'fieldRefs',
+  'interfaces', 'vtableMethods', 'interfaceOffsets', 'typeDefinitions',
+];
+// Header section order for v29+ (Unity 2021.2 – 6000.x).
+const SECTIONS_V29 = [
+  ...COMMON, 'images', 'assemblies', 'fieldRefs',
   'referencedAssemblies', 'attributeData', 'attributeDataRange', 'unresolvedIndirectCallParameterTypes',
   'unresolvedIndirectCallParameterRanges', 'windowsRuntimeTypeNames', 'windowsRuntimeStrings', 'exportedTypeDefinitions',
 ];
-// v24.2 – v27.x: metadataUsage* sections, attributesInfo/attributeTypes instead of attributeData.
-const SECTIONS_V24 = [
-  'stringLiteral', 'stringLiteralData', 'string', 'events', 'properties', 'methods',
-  'parameterDefaultValues', 'fieldDefaultValues', 'fieldAndParameterDefaultValueData', 'fieldMarshaledSizes',
-  'parameters', 'fields', 'genericParameters', 'genericParameterConstraints', 'genericContainers', 'nestedTypes',
-  'interfaces', 'vtableMethods', 'interfaceOffsets', 'typeDefinitions', 'images', 'assemblies',
-  'metadataUsageLists', 'metadataUsagePairs', 'fieldRefs', 'referencedAssemblies', 'attributesInfo', 'attributeTypes',
+// v27.x (Unity 2020.2 – 2021.1): metadataUsage* gone, attributesInfo/attributeTypes still there.
+const SECTIONS_V27 = [
+  ...COMMON, 'images', 'assemblies', 'fieldRefs', 'referencedAssemblies', 'attributesInfo', 'attributeTypes',
   'unresolvedIndirectCallParameterTypes', 'unresolvedIndirectCallParameterRanges', 'windowsRuntimeTypeNames',
   'windowsRuntimeStrings', 'exportedTypeDefinitions',
 ];
+// v24.2 – v24.5 (Unity 2019.2 – 2020.1): metadataUsage* sections; the header is 264 bytes.
+const SECTIONS_V24 = [
+  ...COMMON, 'images', 'assemblies', 'metadataUsageLists', 'metadataUsagePairs', 'fieldRefs', 'referencedAssemblies',
+  'attributesInfo', 'attributeTypes', 'unresolvedIndirectCallParameterTypes', 'unresolvedIndirectCallParameterRanges',
+  'windowsRuntimeTypeNames', 'exportedTypeDefinitions',
+];
+// v24.0 – v24.1 (Unity 2018.x – 2019.1): rgctxEntries sits between typeDefinitions and images.
+const SECTIONS_V24_RGCTX = [
+  ...COMMON, 'rgctxEntries', 'images', 'assemblies', 'metadataUsageLists', 'metadataUsagePairs', 'fieldRefs',
+  'referencedAssemblies', 'attributesInfo', 'attributeTypes', 'unresolvedIndirectCallParameterTypes',
+  'unresolvedIndirectCallParameterRanges', 'windowsRuntimeTypeNames', 'exportedTypeDefinitions',
+];
+const V24_2_HEADER = 8 + SECTIONS_V24.length * 8; // 264
+
+/** Unity versions that ship each metadata (sub)version, for display. */
+export const METADATA_ERAS = [
+  [24.0, 'Unity 2018.1 – 2018.2'], [24.1, 'Unity 2018.3 – 2019.1'], [24.2, 'Unity 2019.2 – 2019.3'],
+  [24.4, 'Unity 2019.4 – 2020.1'], [27, 'Unity 2020.2 – 2021.1'], [29, 'Unity 2021.2 – 2023.1'],
+  [31, 'Unity 2023.2 – 6000.2'], [38, 'Unity 6000.3+'],
+];
+export function metadataEra(sub) {
+  let out = '';
+  for (const [v, era] of METADATA_ERAS) if (sub >= v) out = era;
+  return out;
+}
 
 // Type definition bitfield
 const TD_VALUETYPE = 1;
@@ -64,7 +93,9 @@ export class Metadata {
     // v38+ sections carry a record count
     this.counted = this.version >= 38;
     const stride = this.counted ? 12 : 8;
-    const names = this.version >= 29 ? SECTIONS_V29 : SECTIONS_V24;
+    if (this.version < 24) throw new MetadataError(`IL2CPP metadata v${this.version} is too old (Unity 2017 and earlier aren't supported; oldest supported: v24, Unity 2018.1)`);
+    const names = this.version >= 29 ? SECTIONS_V29 : this.version >= 27 ? SECTIONS_V27
+      : this.headerSize === V24_2_HEADER ? SECTIONS_V24 : SECTIONS_V24_RGCTX;
     this.sec = {};
     for (let k = 0; k < names.length; k++) {
       const off = 8 + k * stride;
@@ -76,6 +107,10 @@ export class Metadata {
       };
     }
     this._str = new Map();
+    this.legacy = this._legacy();
+    this.subVersion = this.legacy.sub;
+    /** "24.1", "27", "29"… for display */
+    this.versionLabel = this.version === 24 ? this.subVersion.toFixed(1) : String(this.subVersion);
     this._layout();
 
     // ---- images
@@ -96,14 +131,14 @@ export class Metadata {
     this.typeCount = this.images.reduce((a, b) => Math.max(a, b.typeStart + b.typeCount), 0);
     this.tdBase = this.sec.typeDefinitions.off;
     const tdActual = Math.round(this.sec.typeDefinitions.size / this.typeCount);
-    if (tdActual !== this.tdSize) throw new MetadataError(`unexpected type definition size ${tdActual} (expected ${this.tdSize})`);
+    if (tdActual !== this.tdSize) throw new MetadataError(`metadata v${this.subVersion}: unexpected type definition size ${tdActual} (expected ${this.tdSize})`);
 
     let methodTotal = 0;
     for (let i = 0; i < this.typeCount; i++) { const t = this._tdRaw(i); if (t.methodStart >= 0) methodTotal = Math.max(methodTotal, t.methodStart + t.methodCount); }
     this.methodCount = this.counted ? this.sec.methods.count : methodTotal;
     if (!this.counted) {
       const mdSize = methodTotal ? Math.round(this.sec.methods.size / methodTotal) : 32;
-      if (mdSize !== this.L.method.size) throw new MetadataError(`unexpected method definition size ${mdSize} (expected ${this.L.method.size})`);
+      if (mdSize !== this.L.method.size) throw new MetadataError(`metadata v${this.subVersion}: unexpected method definition size ${mdSize} (expected ${this.L.method.size})`);
     }
 
     this.imageOfType = new Int32Array(this.typeCount).fill(-1);
@@ -125,19 +160,19 @@ export class Metadata {
     this.w = w;
 
     // ---- type definitions
+    const lg = this.legacy;
     const td = []; let o = 0;
     const add = (name, size) => { td.push([name, o, size]); o += Math.abs(size); };
-    add('nameIndex', 4); add('namespaceIndex', 4); add('byvalTypeIndex', w.T);
+    add('nameIndex', 4); add('namespaceIndex', 4);
+    if (lg.cattr) add('customAttributeIndex', 4);
+    add('byvalTypeIndex', w.T);
     const tdSizeV = this.counted ? rec(s.typeDefinitions) : null;
-    if (!this.counted && this.version < 27) {
-      // v24.x has byrefTypeIndex (92-byte records)
-      const n = this._typeCountGuess();
-      if (n && Math.round(s.typeDefinitions.size / n) === 92) add('byrefTypeIndex', 4);
-    }
+    if (!this.counted && this.version < 27) add('byrefTypeIndex', 4); // v24.x
     add('declaringTypeIndex', w.T); add('parentIndex', w.T);
     // elementTypeIndex was dropped in v38+; keep it when the record size says it's there
     const restSize = w.GC + 4 + 32 + 16 + 8;
     if (!this.counted || tdSizeV === o + w.T + restSize) add('elementTypeIndex', w.T);
+    if (lg.rgctx) { add('rgctxStartIndex', 4); add('rgctxCount', 4); }
     add('genericContainerIndex', w.GC); add('flags', 4);
     for (const n of ['fieldStart', 'methodStart', 'eventStart', 'propertyStart', 'nestedTypesStart', 'interfacesStart', 'vtableStart', 'interfaceOffsetsStart']) add(n, 4);
     for (const n of ['methodCount', 'propertyCount', 'fieldCount', 'eventCount', 'nestedCount', 'vtableCount', 'interfacesCount', 'interfaceOffsetsCount']) add(n, -2);
@@ -151,20 +186,26 @@ export class Metadata {
     const addM = (name, size) => { mf.push([name, o, size]); o += Math.abs(size); };
     addM('nameIndex', 4); addM('declaringType', w.TD); addM('returnType', w.T);
     if (this.version >= 31) addM('returnParameterToken', 4);
-    addM('parameterStart', w.P); addM('genericContainerIndex', w.GC); addM('token', 4);
+    addM('parameterStart', w.P);
+    if (lg.cattr) addM('customAttributeIndex', 4);
+    addM('genericContainerIndex', w.GC);
+    // v24.0/24.1: methodIndex points into Il2CppCodeRegistration.methodPointers (no code modules yet)
+    if (lg.rgctx) { addM('methodIndex', 4); addM('invokerIndex', 4); addM('delegateWrapperIndex', 4); addM('rgctxStartIndex', 4); addM('rgctxCount', 4); }
+    addM('token', 4);
     addM('flags', -2); addM('iflags', -2); addM('slot', -2); addM('parameterCount', -2);
     this.L.method = { fields: mf, size: o };
     if (this.counted && rec(s.methods) !== o) throw new MetadataError(`metadata v${this.version}: methods are ${rec(s.methods)} bytes, expected ${o}`);
 
-    this.L.param = { size: 8 + w.T };       // nameIndex, token, typeIndex
-    this.L.field = { size: 8 + w.T };       // nameIndex, typeIndex, token
-    this.L.prop = { size: 20 };             // nameIndex, get, set, attrs, token
+    const ca = lg.cattr ? 4 : 0; // v24.0 customAttributeIndex
+    this.L.param = { size: 8 + ca + w.T, typeIndex: 8 + ca };     // nameIndex, token, [cattr], typeIndex
+    this.L.field = { size: 8 + ca + w.T, token: 4 + w.T + ca };   // nameIndex, typeIndex, [cattr], token
+    this.L.prop = { size: 20 + ca, token: 16 + ca };              // nameIndex, get, set, attrs, [cattr], token
     this.L.gparam = { size: w.GC + 12 };    // ownerIndex, nameIndex, constraintsStart, constraintsCount, num, flags
     this.L.gcontainer = { size: 16 };       // ownerIndex, type_argc, is_method, genericParameterStart
     this.L.fieldDefault = { size: 8 + w.T };
     this.L.image = this.counted
       ? { size: 32 + 2 * w.TD, typeCount: 8 + w.TD, token: 20 + 2 * w.TD }
-      : { size: 40, typeCount: 12, token: 28 };
+      : { size: lg.image, typeCount: 12, token: 28 };
     // string literals: { length, dataIndex } until v35; just dataIndex (with a sentinel) after
     const lit = s.stringLiteral;
     this.L.literal = this.counted && rec(lit) === 4 ? { size: 4, packed: true } : { size: 8, packed: false };
@@ -174,11 +215,43 @@ export class Metadata {
     this.mdSize = this.L.method.size;
   }
 
-  _typeCountGuess() {
+  /** Highest typeStart + typeCount over the image records, for a given record size. */
+  _typeCountFor(imageSize) {
     const im = this.sec.images;
+    if (!im || !im.size || im.size % imageSize) return 0;
     let n = 0;
-    for (let i = 0; i < im.size / 40; i++) { const p = im.off + i * 40; n = Math.max(n, this.mem.i32At(p + 8) + this.mem.u32At(p + 12)); }
+    for (let i = 0; i < im.size / imageSize; i++) {
+      const p = im.off + i * imageSize;
+      const start = this.mem.i32At(p + 8); const count = this.mem.u32At(p + 12);
+      if (start < 0 || count > 1e6) return 0;
+      n = Math.max(n, start + count);
+    }
     return n;
+  }
+
+  /**
+   * Which v24 flavour this is (the header only says "24"), and which optional record fields
+   * exist. Mirrors Il2CppDumper's detection, but uses record sizes so it can't misfire:
+   *   24.0: 104-byte type definitions, 56-byte methods, 32-byte images, customAttributeIndex everywhere
+   *   24.1: 100-byte type definitions, 52-byte methods (rgctx + methodIndex), 40-byte images
+   *   24.2+: 264-byte header, 92-byte type definitions (byrefTypeIndex), code modules
+   */
+  _legacy() {
+    const v = this.version;
+    const plain = { sub: v, cattr: false, rgctx: false, image: 40 };
+    if (v !== 24 || this.counted) return plain;
+    if (!this.sec.rgctxEntries) {
+      // 24.4 dropped hashValueIndex from assembly names: 68 -> 64-byte assembly records
+      const images = this.sec.images.size / 40;
+      const asm = this.sec.assemblies ? this.sec.assemblies.size : 0;
+      return { ...plain, sub: images && asm / images === 64 ? 24.4 : 24.2 };
+    }
+    const tdBytes = this.sec.typeDefinitions.size;
+    for (const c of [{ sub: 24.1, cattr: false, rgctx: true, image: 40, td: 100 }, { sub: 24.0, cattr: true, rgctx: true, image: 32, td: 104 }]) {
+      const n = this._typeCountFor(c.image);
+      if (n && tdBytes === n * c.td) return c;
+    }
+    throw new MetadataError(`metadata v24 with a ${this.headerSize}-byte header: type definitions don't match 24.0 or 24.1 records`);
   }
 
   /** Signed index of 1, 2 or 4 bytes (all-ones = -1). */
@@ -259,7 +332,7 @@ export class Metadata {
 
   method(i) {
     const p = this.sec.methods.off + i * this.mdSize;
-    const r = { index: i, returnParameterToken: 0 };
+    const r = { index: i, returnParameterToken: 0, methodIndex: -1 };
     for (const [name, off, size] of this.L.method.fields) r[name] = this._read(p + off, size);
     r.nameIndex >>>= 0; r.token >>>= 0;
     r.name = this.str(r.nameIndex);
@@ -269,19 +342,19 @@ export class Metadata {
   param(i) {
     const m = this.mem;
     const p = this.sec.parameters.off + i * this.paramSize;
-    return { index: i, name: this.str(m.u32At(p)), token: m.u32At(p + 4), typeIndex: this._idx(p + 8, this.w.T) };
+    return { index: i, name: this.str(m.u32At(p)), nameIndex: m.u32At(p), token: m.u32At(p + 4), typeIndex: this._idx(p + this.L.param.typeIndex, this.w.T) };
   }
 
   field(i) {
     const m = this.mem;
     const p = this.sec.fields.off + i * this.fieldSize;
-    return { index: i, name: this.str(m.u32At(p)), nameIndex: m.u32At(p), typeIndex: this._idx(p + 4, this.w.T), token: m.u32At(p + 4 + this.w.T) };
+    return { index: i, name: this.str(m.u32At(p)), nameIndex: m.u32At(p), typeIndex: this._idx(p + 4, this.w.T), token: m.u32At(p + this.L.field.token) };
   }
 
   property(i) {
     const m = this.mem;
     const p = this.sec.properties.off + i * this.propSize;
-    return { index: i, name: this.str(m.u32At(p)), get: m.i32At(p + 4), set: m.i32At(p + 8), attrs: m.u32At(p + 12), token: m.u32At(p + 16) };
+    return { index: i, name: this.str(m.u32At(p)), get: m.i32At(p + 4), set: m.i32At(p + 8), attrs: m.u32At(p + 12), token: m.u32At(p + this.L.prop.token) };
   }
 
   nestedType(i) { return this.mem.i32At(this.sec.nestedTypes.off + i * 4); }
@@ -306,6 +379,14 @@ export class Metadata {
     if (addr < sec.off || addr >= sec.off + sec.size) return 'T';
     return this.str(this.mem.u32At(addr + this.w.GC));
   }
+  /** Position of a generic parameter in its container (T of Dictionary<TKey, T> is 1). */
+  genericParamNum(d) {
+    const sec = this.sec.genericParameters;
+    const addr = d < this.genericParamCount ? this.genericParamAddr(d) : d;
+    if (addr < sec.off || addr >= sec.off + sec.size) return 0;
+    return this.mem.u16At(addr + this.w.GC + 8);
+  }
+
   /** Names of a generic container's parameters: ['TKey', 'TValue'] */
   genericParamNames(containerIndex) {
     if (containerIndex < 0) return [];

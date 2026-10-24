@@ -1,38 +1,16 @@
 // Runs at document-start, before the game's loader:
-//  1. capture the Emscripten Module when the framework assigns Module.asm
+//  1. rewrite the game's wasm before it compiles, so patched methods also catch direct calls
 //  2. keep keystrokes typed into the explorer away from the game's key handlers
+// (Finding the game, the Module and the wasm is the shared bootstrap's job: see src/bootstrap.)
 
 import { rewriteDirectCalls } from './loader/wasmrewrite.js';
 
-const state = { Module: null, waiters: [], wasm: null };
+// Own global (Unity Explorer's userscript may be on the same page with its own hooks).
+const state = window.__bananaHooks || (window.__bananaHooks = { wasm: null });
 const PLAN_PREFIX = 'bananaloader:direct:';
 const HOST_ID = 'unity-explorer-host';
 
-function found(M) {
-  if (state.Module) return;
-  state.Module = M;
-  for (const w of state.waiters.splice(0)) w(M);
-}
-
 export function installHooks() {
-  if (window.__ueHooks) return window.__ueHooks;
-  window.__ueHooks = state;
-
-  // ---- 1. Module.asm = exports  (all Unity 2019–6000 frameworks do this)
-  try {
-    if (!Object.getOwnPropertyDescriptor(Object.prototype, 'asm')) {
-      Object.defineProperty(Object.prototype, 'asm', {
-        configurable: true,
-        enumerable: false,
-        get() { return undefined; },
-        set(v) {
-          Object.defineProperty(this, 'asm', { value: v, writable: true, configurable: true, enumerable: true });
-          if (v && typeof v === 'object' && ('locateFile' in this || 'preRun' in this || 'HEAPU8' in this)) found(this);
-        },
-      });
-    }
-  } catch (_) { /* ignore */ }
-
   // ---- 2. direct-call patching: rewrite the game's wasm before it compiles (see wasmrewrite.js)
   installWasmHook();
 
@@ -131,61 +109,4 @@ function installWasmHook() {
     if (!big(bytes.length)) return origInstantiate.call(this, src, imports);
     return origInstantiate.call(this, apply(bytes, 'buf:' + bytes.length), imports);
   };
-}
-
-/** Look for an already-running Unity instance (script injected after the game loaded). */
-export function findModuleInPage() {
-  if (state.Module) return state.Module;
-  const ok = (M) => M && typeof M === 'object' && M.HEAPU8 && (M.asm || M.wasmExports);
-  const names = ['unityInstance', 'unityGameInstance', 'gameInstance', 'myGameInstance', 'unity', 'UnityInstance', 'game'];
-  for (const n of names) {
-    try {
-      const v = window[n];
-      if (v && ok(v.Module)) return v.Module;
-      if (ok(v)) return v;
-    } catch (_) { /* ignore */ }
-  }
-  try { if (ok(window.Module)) return window.Module; } catch (_) { /* ignore */ }
-  for (const k of Object.keys(window)) {
-    try {
-      const v = window[k];
-      if (v && typeof v === 'object' && ok(v.Module) && typeof v.SendMessage === 'function') return v.Module;
-    } catch (_) { /* ignore */ }
-  }
-  return null;
-}
-
-/** Resolves as soon as a Unity Module exists on the page (captured or found), never on other sites. */
-export function detectUnity() {
-  return new Promise((resolve) => {
-    if (state.Module) return resolve(state.Module);
-    state.waiters.push(resolve);
-    let n = 0;
-    const iv = setInterval(() => {
-      if (state.Module) { clearInterval(iv); return; }
-      const M = n++ < 60 ? findModuleInPage() : null;
-      if (M) { clearInterval(iv); found(M); }
-      if (n > 600) clearInterval(iv);
-    }, 1000);
-  });
-}
-
-/** Resolves with the Module once its runtime has started. */
-export function waitForModule(onStatus) {
-  return new Promise((resolve) => {
-    const check = () => {
-      const M = state.Module || findModuleInPage();
-      if (M && M.HEAPU8 && (M.calledRun || M.runtimeInitialized || (M.asm && M._malloc))) {
-        if (M.calledRun === false) return false;
-        resolve(M);
-        return true;
-      }
-      return false;
-    };
-    if (check()) return;
-    const iv = setInterval(() => {
-      if (check()) clearInterval(iv);
-      else onStatus && onStatus(state.Module ? 'Game is starting…' : 'Waiting for the Unity game to load…');
-    }, 500);
-  });
 }

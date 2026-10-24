@@ -27,6 +27,7 @@ export class App {
     this.settings = S; // the explorer views read autoProps / showAccessors from here
     this.ui = new UI();
     this.ui.createWindow('BANANALOADER', { subtitle: 'v' + VERSION, width: 1080, height: 690, toggleKey: S.toggleKey || 'F8', icon: LOGO });
+    if (loader.bootstrap) loader.bootstrap.deferWindow(this.ui); // appears when the loading screen folds away
     this.ui.host.id = EXPLORER_HOST_ID;
     const style = document.createElement('style');
     style.textContent = explorerCss + '\n' + appCss;
@@ -234,7 +235,7 @@ export class App {
       const t0 = performance.now();
       this.notify('Dumping… the game may pause for a few seconds', 'info', 3000);
       try {
-        const r = await liveDump(L.il, { named, log: (m) => L.log.debug && L.log.debug(m) });
+        const r = await liveDump(L.il, { named, log: (m) => L.log.debug && L.log.debug(m), wasmBytes: L.bootstrap && L.bootstrap.wasmBytes || null });
         const name = (L.game.product || document.title || location.hostname || 'game').replace(/[^\w.-]+/g, '_');
         saveFile(`${name}-dump.zip`, zip(r.files), 'application/zip');
         this.notify(`Dumped ${r.summary.types.toLocaleString()} types in ${((performance.now() - t0) / 1000).toFixed(1)} s${r.wasm ? '' : ' (no wasm: function indices and names left out)'}`, 'success', 5000);
@@ -259,6 +260,21 @@ export class App {
     t.createToggle('Direct-call patching', (v) => { S.directCalls = v; save(); this.notify('Takes effect after a page reload', 'info'); }, S.directCalls !== false, { save: false })
       .setTooltip('Rewrites the game\'s wasm as it loads so patches also catch calls compiled straight into game code.');
     t.createToggle('Unity Explorer tabs', (v) => { S.explorer = v; save(); this.notify('Takes effect after a page reload', 'info'); }, S.explorer, { save: false });
+    t.createSection('Loading screen');
+    const boot = L.bootstrap;
+    if (boot) {
+      const lmodes = ['Full screen', 'Corner card', 'Off'];
+      const lkeys = ['full', 'compact', 'off'];
+      t.createDropdown(lmodes, (v) => boot.saveSettings({ modal: lkeys[lmodes.indexOf(v)] || 'full' }), { label: 'Bootstrap loading screen', selected: Math.max(0, lkeys.indexOf(boot.settings.modal)), save: false })
+        .setTooltip('Shown while the game loads, with download, compile and IL2CPP details. Shared with Unity Explorer.');
+      t.createToggle('Hide it automatically when everything is ready', (v) => boot.saveSettings({ autoHide: v }), boot.settings.autoHide !== false, { save: false });
+      const [x, y] = t.createColumns(2);
+      x.createButton('Show loading screen', () => boot.ui && boot.ui.reopen());
+      y.createButton('Copy bootstrap report', () => {
+        const text = boot.report();
+        try { navigator.clipboard.writeText(text); this.notify('Bootstrap report copied', 'success'); } catch (_) { this.ui.prompt('Bootstrap report', { value: text, multiline: true }); }
+      });
+    }
     t.createSection('Explorer');
     const modes = ['Engine types only', 'All types', 'Never (click to get)'];
     const keys = ['engine', 'all', 'none'];

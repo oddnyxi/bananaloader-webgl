@@ -1,6 +1,7 @@
 // Harmony-style patching for IL2CPP methods in WebGL builds.
 //
-// Every managed method compiles to a wasm function that lives in the function table. Calls
+// Every managed method compiles to a wasm function that lives in the function table (on
+// fastcomp builds, Unity 2018 – 2021.1, inside its signature's sub-table: Il2Cpp.slotOf). Calls
 // that go through the table — virtual and interface calls, delegates, Unity messages
 // (Update, Start, OnTriggerEnter…), reflection and engine callbacks — can be intercepted by
 // swapping that table slot for a wasm-typed JS wrapper. Direct (non-virtual) calls compiled
@@ -9,8 +10,6 @@
 import { wasmFunction } from './wasmfn.js';
 import { readPlan, writePlan } from '../hook.js';
 import { T } from '../il2cpp/types.js';
-
-const WASM = { i32: 'i32', ptr: 'i32', i64: 'i64', f32: 'f32', f64: 'f64' };
 
 export class Patcher {
   constructor(loader) {
@@ -36,7 +35,8 @@ export class Patcher {
     const d = this.resolve(target, hooks.sig);
     const why = il.whyNotCallable(d);
     if (why) throw new Error(`patch: can't patch ${d.label}: ${why}`);
-    const ptr = d.ptr;
+    const ptr = il.slotOf(d); // the real table slot (fastcomp: per-signature table + pointer)
+    if (!ptr) throw new Error(`patch: can't patch ${d.label}: ${d._noSlot || 'no code'}`);
     let pm = this.byPtr.get(ptr);
     if (!pm) {
       pm = new PatchedMethod(this, d, ptr);
@@ -48,6 +48,7 @@ export class Patcher {
     const p = {
       owner,
       method: m,
+      slot: ptr,
       target: d.label,
       // shared generic code serves several instantiations: only run for ours (the caller passes its MethodInfo*)
       mi: d.mi || 0,
@@ -69,7 +70,7 @@ export class Patcher {
   }
 
   /** What the document-start hook did with the game's wasm (null if it loaded before us). */
-  get wasm() { return (window.__ueHooks && window.__ueHooks.wasm) || null; }
+  get wasm() { return (window.__bananaHooks && window.__bananaHooks.wasm) || null; }
 
   /** Remember which functions need their direct calls rewritten on the next load. */
   _savePlan() {
@@ -79,7 +80,7 @@ export class Patcher {
       if (!w || !w.key || this.loader.settings.directCalls === false) return;
       const slots = new Set();
       const labels = {};
-      for (const p of this.all) if (p.owner && p.active) { slots.add(p.method.ptr); labels[p.method.ptr] = p.target; }
+      for (const p of this.all) if (p.owner && p.active) { slots.add(p.slot); labels[p.slot] = p.target; }
       const prev = readPlan(w.key);
       writePlan(w.key, { byteLength: w.byteLength, slots: [...slots], labels, saved: Date.now() });
       if (!prev || JSON.stringify([...(prev.slots || [])].sort()) !== JSON.stringify([...slots].sort())) this.loader.emit('patches');
@@ -95,7 +96,7 @@ export class Patcher {
     this.all.delete(p);
     if (p.owner) this._savePlan();
     this.loader.emit('patches');
-    const pm = this.byPtr.get(p.method.ptr);
+    const pm = this.byPtr.get(p.slot);
     if (pm) {
       pm.remove(p);
       if (!pm.patches.length) { pm.restore(); this.byPtr.delete(pm.ptr); }
@@ -119,21 +120,24 @@ class PatchedMethod {
     this.isStatic = m.isStatic;
     this.params = m.params;
     this.retType = m.retType;
-    this.ret = il.abi(this.retType);
+    this.ret = il.abi(this.retType, true);
     this.argAbi = this.params.map((p) => il.abi(p.type));
     for (const a of [this.ret, ...this.argAbi]) if (a.wasm === 'unsupported') throw new Error(`patch: unsupported signature (${a.why})`);
-    const sig = [];
-    if (this.ret.wasm === 'ptr') sig.push('i32');
-    if (!this.isStatic) sig.push('i32');
-    for (const a of this.argAbi) sig.push(WASM[a.wasm] || 'i32');
-    sig.push('i32'); // MethodInfo*
-    this.sig = sig;
-    this.result = this.ret.wasm === 'void' || this.ret.wasm === 'ptr' ? null : WASM[this.ret.wasm];
+    // The wrapper must have exactly the wasm type of the function it replaces (call_indirect
+    // checks it). callSig() knows it, including fastcomp's split 64-bit values and f64 floats.
+    const cs = il.callSig(m);
+    if (cs.error) throw new Error(`patch: ${cs.error}`);
+    if (il.flavor === 'fastcomp' && !cs.exact) throw new Error('patch: the exact wasm signature is unknown on this fastcomp build (reload the page so the bootstrap sees the wasm)');
+    this.cs = cs;
+    this.sig = cs.params;
+    this.result = cs.ilResult; // IL-level result type; cs.retOut converts it for the wasm side
     this.original = il.table.get(ptr);
-    if (this.original.length !== sig.length) throw new Error(`patch: signature mismatch (${sig.length} vs ${this.original.length} params)`);
-    this.offset = (this.ret.wasm === 'ptr' ? 1 : 0) + (this.isStatic ? 0 : 1);
+    if (!this.original) throw new Error(`patch: table slot ${ptr} is empty`);
+    if (this.original.length !== cs.params.length) throw new Error(`patch: signature mismatch (${cs.params.length} vs ${this.original.length} params)`);
+    // IL-level args: [sret?] [this? — static methods had an unused one until Unity 2018.3] args… MethodInfo*
+    this.offset = (this.ret.wasm === 'ptr' ? 1 : 0) + (il.hasThis(m) ? 1 : 0);
     const self = this;
-    this.wrapper = wasmFunction(function bananaHook(...raw) { return self.call(raw); }, sig, this.result);
+    this.wrapper = wasmFunction(function bananaHook(...raw) { return cs.retOut(self.call(cs.join(raw))); }, cs.params, cs.result);
     il.table.set(ptr, this.wrapper);
     il._fn.delete(ptr); // the bridge caches table entries; make our own calls see the patch
   }
@@ -145,12 +149,15 @@ class PatchedMethod {
 
   remove(p) { this.patches = this.patches.filter((x) => x !== p); }
 
+  /** Call the unpatched function with IL-level arguments; returns the IL-level result. */
+  invokeOriginal(args) { return this.cs.retIn(this.original(...this.cs.split(args))); }
+
   restore() { this.patcher.il.table.set(this.ptr, this.original); this.patcher.il._fn.delete(this.ptr); }
 
   call(raw) {
     const ctx = new HookContext(this, raw);
     const loader = this.patcher.loader;
-    const callerMi = raw[raw.length - 1] >>> 0;
+    const callerMi = raw[raw.length - 1] >>> 0; // IL-level args: the MethodInfo* is always last
     const applies = (p) => p.active && (!p.mi || !callerMi || callerMi === p.mi);
     let run = true;
     for (const p of this.patches) {
@@ -160,7 +167,7 @@ class PatchedMethod {
         if (p.prefix.call(p.owner, ctx) === false) run = false;
       } catch (e) { this._fail(p, 'prefix', e); }
     }
-    if (run && !ctx.skipOriginal) ctx.raw = this.original(...ctx.args);
+    if (run && !ctx.skipOriginal) ctx.raw = this.invokeOriginal(ctx.args);
     else if (this.ret.wasm === 'ptr' && ctx._resultSet === false) { /* sret buffer stays zeroed */ }
     for (const p of this.patches) {
       if (!p.postfix || !applies(p)) continue;
@@ -274,7 +281,7 @@ class HookContext {
 
   /** Call the original method yourself (e.g. from a prefix that returns false). */
   callOriginal() {
-    this.raw = this._pm.original(...this.args);
+    this.raw = this._pm.invokeOriginal(this.args);
     return this.result;
   }
 }

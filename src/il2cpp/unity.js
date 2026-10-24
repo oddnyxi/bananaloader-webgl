@@ -63,6 +63,29 @@ export class UnityApi {
 
   isUnityObject(obj) { return this.td.Object >= 0 && this.il.isInstanceOf(obj, this.td.Object); }
 
+  /**
+   * Stricter than alive(), for objects found by scanning the heap: the native object must point
+   * back at its managed wrapper (Unity keeps it in the native object's scripting handle). Stale
+   * memory that merely looks like an object fails this, and calling the engine with one aborts
+   * the game. The back-reference offset is learned from the first objects that have one.
+   */
+  verified(obj) {
+    if (!this.alive(obj)) return false;
+    const m = this.il.mem;
+    const cp = m.u32At(obj + this.cachedPtrOffset);
+    if (!m.valid(cp)) return false;
+    if (this._backOff !== undefined) return m.u32At(cp + this._backOff) === obj;
+    for (let o = 0; o < 160; o += 4) {
+      if (m.u32At(cp + o) !== obj) continue;
+      this._backVotes ||= new Map();
+      const v = (this._backVotes.get(o) || 0) + 1;
+      this._backVotes.set(o, v);
+      if (v >= 3) this._backOff = o;
+      return true;
+    }
+    return false;
+  }
+
   name(obj) {
     if (!this.alive(obj)) return null;
     const n = this.try('name', obj);
@@ -96,7 +119,7 @@ export class UnityApi {
     // last resort: scan the heap for GameObject instances
     const k = il.klassOfTd(goTd);
     if (!k) return { list: [], source: 'none' };
-    return { list: il.findInstances(k, { limit: 200000, validate: (a) => this.alive(a) }), source: 'heap scan' };
+    return { list: il.findInstances(k, { limit: 200000, validate: (a) => this.verified(a) }), source: 'heap scan' };
   }
 
   /** Objects of any UnityEngine.Object type (by type definition). */
@@ -115,7 +138,7 @@ export class UnityApi {
       } catch (_) { /* next */ }
     }
     const k = il.ensureClass(td);
-    return k ? il.findInstances(k, { validate: (a) => this.alive(a) }) : [];
+    return k ? il.findInstances(k, { validate: (a) => this.verified(a) }) : [];
   }
 
   /**

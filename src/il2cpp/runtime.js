@@ -9,11 +9,12 @@
 // convention: (sret?, this?, ...args, MethodInfo*).
 
 import { Memory } from './memory.js';
-import { Metadata } from './metadata.js';
+import { Metadata, metadataEra } from './metadata.js';
 import { findRegistrations } from './registration.js';
 import { T, PRIM_NAME, PRIM_SIZE, REF_KINDS, FIELD, METHOD } from './types.js';
 
 const hex = (n) => '0x' + (n >>> 0).toString(16);
+const WASM_OF = { i32: 'i32', ptr: 'i32', i64: 'i64', f32: 'f32', f64: 'f64' };
 
 // CLR names -> the C# keywords typeName() prints for primitives
 const ALIAS = {
@@ -31,51 +32,401 @@ export class Il2Cpp {
   /**
    * @param {object} Module  the Emscripten Module (unityInstance.Module)
    * @param {(msg:string)=>void} log
+   * @param {object} hints   what the bootstrap captured while the wasm was instantiated:
+   *   { exports, memory, table, signatures: { of(slot), count }, flavor: 'fastcomp' | 'upstream' }.
+   *   Old (fastcomp) builds import their memory and table instead of exporting them.
    */
-  constructor(Module, log = () => {}) {
+  constructor(Module, log = () => {}, hints = {}) {
     this.Module = Module;
     this.log = log;
-    const exp = Module.asm || Module.wasmExports || {};
+    const asm = Module.asm && typeof Module.asm === 'object' ? Module.asm : null;
+    const exp = asm || Module.wasmExports || hints.exports || {};
     const vals = Object.values(exp);
-    const memory = Module.wasmMemory || vals.find((v) => v instanceof WebAssembly.Memory);
-    this.table = Module.wasmTable || vals.find((v) => v instanceof WebAssembly.Table);
+    const heapView = Module.HEAPU8 ? { get buffer() { return Module.HEAPU8.buffer; } } : null;
+    const memory = Module.wasmMemory || vals.find((v) => v instanceof WebAssembly.Memory) || hints.memory || heapView;
+    this.table = Module.wasmTable || vals.find((v) => v instanceof WebAssembly.Table) || hints.table;
     if (!memory) throw new Error('wasm memory not found on Module');
-    if (!this.table) throw new Error('wasm function table not found on Module');
+    if (!this.table) throw new Error('wasm function table not found (for this Unity version the bootstrap has to run at document-start)');
     this.mem = new Memory(memory);
-    this.malloc = Module._malloc || exp.malloc || exp._malloc;
-    this.free = Module._free || exp.free || exp._free;
+    const pick = (...names) => {
+      for (const n of names) {
+        for (const src of [Module, exp, hints.exports || {}]) { const f = src[n]; if (typeof f === 'function') return f; }
+      }
+      return undefined;
+    };
+    this.malloc = pick('_malloc', 'malloc');
+    this.free = pick('_free', 'free');
     if (typeof this.malloc !== 'function' || typeof this.free !== 'function') throw new Error('malloc/free not found on Module');
-    this.stackSave = Module.stackSave || exp.stackSave;
-    this.stackRestore = Module.stackRestore || exp.stackRestore;
+    this.stackSave = pick('stackSave');
+    this.stackRestore = pick('stackRestore');
+    // fastcomp (Unity 2018 – 2021.1) may return the high half of a legalized i64 in tempRet0
+    this.getTempRet0 = pick('getTempRet0', '_getTempRet0');
+    this.setTempRet0 = pick('setTempRet0', '_setTempRet0');
+    const names = Object.keys(exp);
+    this.flavor = hints.flavor || (names.includes('_malloc') || names.includes('_free') ? 'fastcomp' : 'upstream');
+    this.sigs = hints.signatures || null;
+    // fastcomp: per-signature function tables inside the one wasm table (see WasmModule.fnTables)
+    this.fnTables = hints.fnTables || null;
+    this.i64Mode = this.flavor === 'upstream' ? 'native' : 'unknown';
+    this.byrefBit = 29;
+    this.staticThis = false; // Unity <= 2018.2: static methods take an unused leading `this`
+    this.splitI64 = false;   // Unity <= 2018.2: long parameters arrive as two i32 halves
     this._fn = new Map();
     this.ready = false;
   }
 
   // ------------------------------------------------------------------ init
 
-  init() {
+  /**
+   * @param trace optional step reporter (a bootstrap client): { run(id, label, fn(note)) }.
+   *   Each stage is timed and shows up on the loading screen with what it found.
+   */
+  init(trace = null) {
     const t0 = performance.now();
-    const base = Metadata.locate(this.mem);
-    if (base < 0) throw new Error('global-metadata not found in memory (is the game fully loaded?)');
-    this.md = new Metadata(this.mem, base);
-    this.md._declTd = (typeIndex) => this.tdOfTypeIndex(typeIndex);
-    this.log(`metadata v${this.md.version} at ${hex(base)}: ${this.md.images.length} assemblies, ${this.md.typeCount} types, ${this.md.methodCount} methods`);
-
-    const limit = Math.min(base, 512 << 20);
-    const reg = findRegistrations(this.mem, this.md, limit);
-    if (!reg.meta) throw new Error('Il2CppMetadataRegistration not found');
-    if (!reg.modules.size) throw new Error('Il2CppCodeRegistration not found');
-    this.reg = reg;
-    this.log(`registrations: ${reg.meta.typesCount} types, ${reg.modules.size} code modules`);
-
-    // image index -> code module
-    this.moduleOfImage = this.md.images.map((img) => reg.modules.get(img.name) || null);
-
-    this._indexTypes();
-    this._calibrate();
+    for (const [id, label, fn] of this._initSteps()) this._runStep(trace, id, label, fn);
     this.ready = true;
     this.log(`ready in ${Math.round(performance.now() - t0)} ms`);
     return this;
+  }
+
+  /** Same as init(), but lets the page paint between stages (so a loading screen can show them). */
+  async initAsync(trace = null) {
+    const t0 = performance.now();
+    const frame = () => new Promise((r) => { let done = false; const go = () => { if (!done) { done = true; r(); } }; requestAnimationFrame(() => setTimeout(go, 0)); setTimeout(go, 60); });
+    for (const [id, label, fn] of this._initSteps()) {
+      await frame();
+      this._runStep(trace, id, label, fn);
+    }
+    this.ready = true;
+    this.log(`ready in ${Math.round(performance.now() - t0)} ms`);
+    return this;
+  }
+
+  _runStep(trace, id, label, fn) {
+    return trace && trace.run ? trace.run(id, label, fn) : fn(() => {});
+  }
+
+  _initSteps() {
+    return [
+      ['metadata', 'Locate global-metadata.dat', (note) => {
+        const base = Metadata.locate(this.mem);
+        if (base < 0) throw new Error('global-metadata not found in memory (is the game fully loaded?)');
+        this.md = new Metadata(this.mem, base);
+        this.md._declTd = (typeIndex) => this.tdOfTypeIndex(typeIndex);
+        const era = metadataEra(this.md.subVersion);
+        this.log(`metadata v${this.md.versionLabel} at ${hex(base)}: ${this.md.images.length} assemblies, ${this.md.typeCount} types, ${this.md.methodCount} methods`);
+        note(`v${this.md.versionLabel}${era ? ` (${era})` : ''} at ${hex(base)} · ${this.md.images.length} assemblies · ${this.md.typeCount.toLocaleString()} types · ${this.md.methodCount.toLocaleString()} methods`);
+      }],
+      ['registrations', 'Find code & metadata registrations', (note) => {
+        const limit = Math.min(this.md.base, 512 << 20);
+        const reg = findRegistrations(this.mem, this.md, limit);
+        if (!reg.meta) throw new Error('Il2CppMetadataRegistration not found');
+        if (!reg.modules.size && !reg.flat) throw new Error('Il2CppCodeRegistration not found');
+        this.reg = reg;
+        const code = reg.flat ? `flat method table (${reg.flat.count.toLocaleString()} pointers)` : `${reg.modules.size} code modules`;
+        this.log(`registrations: ${reg.meta.typesCount} types, ${code}`);
+        note(`metadata registration @ ${hex(reg.meta.addr)} · ${reg.meta.typesCount.toLocaleString()} types · ${code}`);
+        // image index -> code module
+        this.moduleOfImage = this.md.images.map((img) => reg.modules.get(img.name) || null);
+      }],
+      ['types', 'Index type names', (note) => {
+        this._indexTypes();
+        this._detectTypeBits();
+        this._detectStaticThis();
+        note(`${this.byFullName.size.toLocaleString()} names · Il2CppType.byref at bit ${this.byrefBit}${this.staticThis ? ' · static methods take a leading __this' : ''}${this.splitI64 ? ' · long parameters split in two' : ''}`);
+      }],
+      ['layout', 'Calibrate runtime structs', (note) => {
+        this._calibrate();
+        const L = this.layout;
+        note(`Il2CppClass name@${L.name} parent@${L.parent} fields@${L.fields} methods@${L.methods ?? '–'} · MethodInfo ${L.mi.vptr < 0 ? 'pre-2021.2' : '2021.2+'} layout${this.classTable ? ' · class table found' : ''}`);
+      }],
+      ['abi', 'Probe calling convention', (note) => {
+        this._probeAbi();
+        const fc = this.flavor === 'fastcomp';
+        note(`${fc ? 'fastcomp / asm2wasm' : 'LLVM wasm backend'}${this.fnTables ? ` · ${this.fnTables.size} per-signature function tables` : ''} · i64 ${this.i64Mode}${this.sigs ? ` · ${this.sigs.count.toLocaleString()} typed table slots` : ''}`);
+      }],
+    ];
+  }
+
+  /**
+   * Il2CppType bitfield: before metadata v27.2 it was attrs:16 type:8 num_mods:6 byref:1 pinned:1;
+   * 27.2 shrank num_mods to 5 bits and added valuetype, moving byref from bit 30 to 29.
+   * v27 doesn't say which, so look at the types: only the new layout sets bit 31 (valuetype).
+   */
+  _detectTypeBits() {
+    const v = this.md.version;
+    if (v >= 29) { this.byrefBit = 29; return; }
+    if (v < 27) { this.byrefBit = 30; return; }
+    const meta = this.reg.meta;
+    const n = Math.min(meta.typesCount, 20000);
+    let top = 0;
+    for (let i = 0; i < n; i++) {
+      const p = this.mem.u32At(meta.types + i * 4);
+      if (p && (this.mem.u32At(p + 4) >>> 31)) top++;
+    }
+    this.byrefBit = top > n * 0.02 ? 29 : 30;
+  }
+
+  /**
+   * Are 64-bit integers real wasm i64s, or split into two i32s (fastcomp's legalization)?
+   * Checked on a few always-present mscorlib methods that take a long.
+   */
+  _probeAbi() {
+    if (this.i64Mode === 'native' && !this.sigs) return;
+    const probes = [
+      ['System.Math', 'Abs', ['System.Int64']], ['System.Math', 'Max', ['System.Int64', 'System.Int64']],
+      ['System.BitConverter', 'GetBytes', ['System.Int64']], ['System.Convert', 'ToInt32', ['System.Int64']],
+      ['System.Int64', 'Equals', ['System.Int64']], ['System.TimeSpan', 'FromTicks', ['System.Int64']],
+    ];
+    for (const [t, n, sig] of probes) {
+      let m = null;
+      try { m = this.findMethod(t, n, sig); } catch (_) { /* ignore */ }
+      if (!m) continue;
+      const d = this.desc(m);
+      const { il } = this._ilSig(d);
+      const nI64 = il.filter((x) => x === 'i64').length;
+      const kept = il.length - (d._dropMI ? 1 : 0);
+      let len;
+      const slot = this.slotOf(d);
+      if (slot <= 0) continue;
+      const exact = this.sigs && this.sigs.of(slot);
+      if (exact) len = exact.params.length;
+      else { try { len = this.fn(slot).length; } catch (_) { continue; } }
+      if (len === kept) { this.i64Mode = 'native'; return; }
+      if (len === kept + nI64) { this.i64Mode = 'legalized'; return; }
+    }
+  }
+
+  /** Does the compiled function take a `this` argument? (static ones did too, until Unity 2018.3) */
+  hasThis(d, staticThis = this.staticThis) { return !d.isStatic || staticThis; }
+
+  /** IL-level wasm signature of a descriptor: [sret?] [this?] args... MethodInfo* */
+  _ilSig(d, staticThis = this.staticThis) {
+    const ret = this.abi(d.retType, true);
+    const il = [];
+    if (ret.wasm === 'ptr') il.push('i32');
+    if (this.hasThis(d, staticThis)) il.push('i32');
+    for (const p of d.params) { const a = this.abi(p.type); il.push(WASM_OF[a.wasm] || 'i32'); }
+    il.push('i32');
+    return { il, ilResult: ret.wasm === 'void' || ret.wasm === 'ptr' ? null : WASM_OF[ret.wasm] || 'i32', ret };
+  }
+
+  /** Emscripten signature string ("viii", "fif", "jij") of a descriptor, as dynCall_* names it. */
+  dynSig(d, staticThis = this.staticThis, splitI64 = this.splitI64) {
+    const L = { i32: 'i', i64: splitI64 ? 'ii' : 'j', f32: 'f', f64: 'd' };
+    const { il, ilResult } = this._ilSig(d, staticThis);
+    return (ilResult ? (ilResult === 'i64' ? 'j' : L[ilResult]) : 'v') + il.map((x) => L[x] || 'i').join('');
+  }
+
+  /**
+   * The wasm table index that holds a method's code. On LLVM-backend builds (Unity 2021.2+)
+   * that is the method pointer itself. fastcomp builds (Unity 2018 – 2021.1) keep a separate
+   * table per signature inside the wasm table, so the pointer is relative to its signature's
+   * table: index = offset[sig] + (ptr & mask[sig]). Returns 0 when it can't be resolved.
+   */
+  slotOf(d) {
+    if (!d) return 0;
+    if (!d.__desc) d = this.desc(d);
+    if (d._slot !== undefined) return d._slot;
+    let slot = d.ptr >>> 0;
+    if (this.fnTables && slot) {
+      const r = this._resolveSlot(d, this.staticThis);
+      slot = r ? r.slot : 0;
+      d._dropMI = !!(r && r.dropMI);
+      if (r) d._wasmSig = r.sig;
+      else d._noSlot = `pointer ${d.ptr} isn't in this build's ${this.dynSig(d)} function table`;
+    } else if (slot && this.flavor === 'fastcomp') {
+      // the raw pointer would land on an unrelated function: refuse rather than guess
+      slot = 0;
+      d._noSlot = 'fastcomp build: function tables unknown (reload the page with the bootstrap active)';
+    }
+    d._slot = slot;
+    return slot;
+  }
+
+  /**
+   * fastcomp: the exact wasm signature of a method, read from its IL2CPP invoker. Invokers call
+   * the method pointer through call_indirect, typed with the method's real signature (leading
+   * `this` on old static methods, split longs, f32 vs f64 and all). Returns "viii"-style or null.
+   */
+  _invokerSig(d) {
+    const inv = this.reg && this.reg.invokers;
+    if (!inv || !this.sigs || !this.sigs.callTypeAt || !this.fnTables) return null;
+    const meta = d.meta;
+    if (!meta || meta.genericContainerIndex !== -1) return null;
+    let idx;
+    if (this.reg.flat) idx = meta.invokerIndex;
+    else {
+      const mod = this.moduleOfImage[this.md.imageOfType[meta.declaringType]];
+      if (!mod || !mod.invokerIndices) return null;
+      const rid = meta.token & 0x00ffffff;
+      if (rid < 1 || rid > mod.methodPointerCount) return null;
+      idx = this.mem.i32At(mod.invokerIndices + (rid - 1) * 4);
+    }
+    if (!(idx >= 0 && idx < inv.count)) return null;
+    const p = this.mem.u32At(inv.pointers + idx * 4);
+    const t = this.fnTables.get('iiiii') || this.fnTables.get('viiiii');
+    if (!p || !t || (t.mask !== null && p > t.mask)) return null;
+    const type = this.sigs.callTypeAt(t.offset + (t.mask === null ? p : p & t.mask));
+    if (!type) return null;
+    const L = { i32: 'i', i64: 'j', f32: 'f', f64: 'd' };
+    return (type.result ? L[type.result] : 'v') + type.params.map((x) => L[x]).join('');
+  }
+
+  /**
+   * fastcomp: find a method's function in its signature's table. Candidates, in order: the
+   * invoker's exact signature, then the one computed from the IL types; each also without the
+   * trailing MethodInfo*, which the optimizer drops from some methods that never read it
+   * (Math.Sqrt becomes double(double)). A candidate counts only if the pointer fits that table
+   * and doesn't land on an abort stub.
+   */
+  _resolveSlot(d, staticThis, splitI64 = this.splitI64) {
+    const full = this.dynSig(d, staticThis, splitI64);
+    const inv = this._invokerSig(d);
+    const cands = inv && inv !== full ? [inv, inv.slice(0, -1), full, full.slice(0, -1)] : [full, full.slice(0, -1)];
+    for (const sig of cands) {
+      const t = this.fnTables.get(sig);
+      if (!t) continue;
+      if (t.mask !== null && d.ptr > t.mask) continue;
+      const at = t.offset + (t.mask === null ? d.ptr : d.ptr & t.mask);
+      if (this.sigs && this.sigs.isStub && this.sigs.isStub(at)) continue;
+      return { slot: at, dropMI: sig === full.slice(0, -1) || (!!inv && sig === inv.slice(0, -1)), sig, fromInvoker: sig === inv };
+    }
+    return null;
+  }
+
+  /**
+   * Conventions old fastcomp builds don't record anywhere: did static methods take an unused
+   * leading `this` (IL2CPP before Unity 2018.3)? Are long parameters split into two i32s? The
+   * invokers say exactly, so let them vote; without them, see which reading makes more methods
+   * land on real functions.
+   */
+  _detectStaticThis() {
+    this.staticThis = false;
+    this.splitI64 = false;
+    if (!this.fnTables) return;
+    const votes = { st: 0, noSt: 0, split: 0, native: 0 };
+    let n = 0;
+    for (let td = 0; td < this.md.typeCount && n < 1500; td++) {
+      if (this.md.typeDef(td).isGeneric) continue;
+      for (const m of this.methodsOf(td)) {
+        if (m.genericContainerIndex !== -1 || !this.methodPointer(m)) continue;
+        const d = this.desc(m);
+        const inv = this._invokerSig(d);
+        if (!inv) continue;
+        n++;
+        const hasLong = this._ilSig(d, false).il.includes('i64');
+        for (const [st, sp] of [[false, false], [true, false], [false, true], [true, true]]) {
+          if (this.dynSig(d, st, sp) !== inv) continue;
+          if (d.isStatic) votes[st ? 'st' : 'noSt']++;
+          if (hasLong) votes[sp ? 'split' : 'native']++;
+          break;
+        }
+      }
+    }
+    if (votes.st + votes.noSt + votes.split + votes.native > 0) {
+      this.staticThis = votes.st > votes.noSt;
+      this.splitI64 = votes.split > votes.native;
+      this.log(`invoker signatures (${n}): static this ${votes.st}/${votes.st + votes.noSt}, split longs ${votes.split}/${votes.split + votes.native}`);
+      return;
+    }
+    // no invokers: count which reading lands on real functions
+    let without = 0; let withThis = 0;
+    n = 0;
+    for (let td = 0; td < this.md.typeCount && n < 800; td++) {
+      if (this.md.typeDef(td).isGeneric) continue;
+      for (const m of this.methodsOf(td)) {
+        if (!(m.flags & METHOD.STATIC) || m.genericContainerIndex !== -1 || !this.methodPointer(m)) continue;
+        const d = this.desc(m);
+        n++;
+        if (this._resolveSlot(d, false, false)) without++;
+        if (this._resolveSlot(d, true, false)) withThis++;
+      }
+    }
+    this.staticThis = withThis > without && withThis > n * 0.6;
+    this.log(`static methods: ${without}/${n} resolve without __this, ${withThis}/${n} with it`);
+  }
+
+  /**
+   * How a method's IL-level arguments map onto the actual wasm function in its table slot.
+   * Upstream (LLVM) builds match one to one. fastcomp builds may split each i64 into (lo, hi)
+   * i32s and return the high half in tempRet0, and may pass floats as f64; the exact types come
+   * from the game's wasm binary when the bootstrap saw it.
+   * Returns { params, result, exact, legal, split(args), join(raw), retIn(v), retOut(v), error? }
+   */
+  callSig(d) {
+    if (d._cs) return d._cs;
+    const { il, ilResult } = this._ilSig(d);
+    const slot = this.slotOf(d);
+    const exact = this.sigs && slot > 0 ? this.sigs.of(slot) : null;
+    const last = il.length - 1;
+    const drop = (i) => d._dropMI && i === last; // MethodInfo* not passed (see slotOf)
+    let params; let result; const map = [];
+    if (exact) {
+      params = exact.params; result = exact.result;
+      // line the IL arguments up with the wasm parameters: a long may be two i32s, and the
+      // trailing MethodInfo* may be missing (the optimizer drops it where it's never read)
+      const align = (dropLast) => {
+        const mp = []; let j = 0;
+        il.forEach((t, i) => {
+          if (dropLast && i === last) mp.push(0);
+          else if (t === 'i64' && params[j] === 'i32' && params[j + 1] === 'i32') { mp.push(2); j += 2; } else { mp.push(1); j += 1; }
+        });
+        return j === params.length ? mp : null;
+      };
+      const mp = align(false) || align(true);
+      if (!mp) return { error: `signature mismatch (IL ${il.length} params, wasm ${params.length})`, params, result, exact: true, il, ilResult };
+      map.push(...mp);
+      d._dropMI = mp[last] === 0;
+    } else {
+      let len = il.length;
+      try { len = this.fn(slot).length; } catch (_) { /* no table entry */ }
+      const nI64 = il.filter((x) => x === 'i64').length;
+      const kept = il.length - (d._dropMI ? 1 : 0);
+      const legal = this.i64Mode === 'legalized' || (nI64 > 0 && len === kept + nI64);
+      il.forEach((t, i) => map.push(drop(i) ? 0 : t === 'i64' && legal ? 2 : 1));
+      params = il.flatMap((t, i) => (drop(i) ? [] : t === 'i64' && legal ? ['i32', 'i32'] : [t]));
+      result = ilResult === 'i64' && legal ? 'i32' : ilResult;
+      if (len !== params.length) return { error: `signature mismatch (expected ${params.length} wasm params, function takes ${len})`, params, result, exact: false, il, ilResult };
+    }
+    const retLegal = ilResult === 'i64' && result === 'i32';
+    const legal = map.some((x) => x !== 1) || retLegal;
+    const self = this;
+    const cs = {
+      params, result, il, ilResult, exact: !!exact, legal, dropMI: !!d._dropMI,
+      split(args) {
+        if (!legal) return args;
+        const out = [];
+        for (let i = 0; i < args.length; i++) {
+          if (map[i] === 0) continue;
+          if (map[i] === 2) { const b = BigInt.asUintN(64, BigInt(args[i] ?? 0)); out.push(Number(b & 0xffffffffn) | 0, Number(b >> 32n) | 0); } else out.push(args[i]);
+        }
+        return out;
+      },
+      join(raw) {
+        if (!legal) return raw;
+        const out = [];
+        for (let i = 0, j = 0; i < map.length; i++) {
+          if (map[i] === 0) out.push(0);
+          else if (map[i] === 2) { out.push(BigInt.asIntN(64, (BigInt(raw[j + 1] >>> 0) << 32n) | BigInt(raw[j] >>> 0))); j += 2; } else out.push(raw[j++]);
+        }
+        return out;
+      },
+      retIn(v) {
+        if (!retLegal) return v;
+        const hi = self.getTempRet0 ? self.getTempRet0() : 0;
+        return BigInt.asIntN(64, (BigInt(hi >>> 0) << 32n) | BigInt(v >>> 0));
+      },
+      retOut(v) {
+        if (!retLegal) return v;
+        const b = BigInt.asIntN(64, BigInt(v ?? 0));
+        if (self.setTempRet0) self.setTempRet0(Number(BigInt.asIntN(32, b >> 32n)));
+        return Number(BigInt.asIntN(32, b));
+      },
+    };
+    if (retLegal && !this.getTempRet0) cs.error = 'returns a split 64-bit value but getTempRet0 is not exported';
+    d._cs = cs;
+    return cs;
   }
 
   _indexTypes() {
@@ -97,7 +448,7 @@ export class Il2Cpp {
   typeInfo(p) {
     const m = this.mem;
     const bits = m.u32At(p + 4);
-    return { ptr: p, data: m.u32At(p), attrs: bits & 0xffff, kind: (bits >>> 16) & 0xff, byref: ((bits >>> 29) & 1) === 1 };
+    return { ptr: p, data: m.u32At(p), attrs: bits & 0xffff, kind: (bits >>> 16) & 0xff, byref: ((bits >>> this.byrefBit) & 1) === 1 };
   }
 
   /** Il2CppType.data for CLASS/VALUETYPE is a typedef index (static data) or a typedef handle (runtime). */
@@ -315,7 +666,7 @@ export class Il2Cpp {
     const pp = m.u32At(mi + L.params);
     const params = [];
     const metaParams = meta ? this.params(meta) : [];
-    for (let i = 0; i < n; i++) params.push({ name: metaParams[i] ? metaParams[i].name : `arg${i}`, type: m.u32At(pp + i * 4) });
+    for (let i = 0; i < n; i++) params.push({ name: metaParams[i] ? metaParams[i].name : `arg${i}`, type: m.u32At(pp + i * L.paramStride + L.paramType) });
     const flags = m.u16At(mi + L.flags);
     const name = m.cstr(m.u32At(mi + L.name), 512);
     return {
@@ -356,7 +707,7 @@ export class Il2Cpp {
     if (PRIM[name]) name = PRIM[name];
     if (name.endsWith('[]')) {
       const el = this.resolveTypeName(name.slice(0, -2));
-      const t = this.call(this.findMethod('System.RuntimeType', 'MakeArrayType', 0) || this.findMethod('System.Type', 'MakeArrayType', 0), this.typeObject(el));
+      const t = this.call(this.findMethod('System.RuntimeType', 'MakeArrayType', 0) || this.findMethod('System.MonoType', 'MakeArrayType', 0) || this.findMethod('System.Type', 'MakeArrayType', 0), this.typeObject(el));
       return this._typeOfTypeObject(t);
     }
     const lt = name.indexOf('<');
@@ -385,7 +736,7 @@ export class Il2Cpp {
     const key = td + ':' + argTypes.join(',');
     this._gtypes ||= new Map();
     if (this._gtypes.has(key)) return this._gtypes.get(key);
-    const mk = this.findMethod('System.RuntimeType', 'MakeGenericType', 1);
+    const mk = this.findMethod('System.RuntimeType', 'MakeGenericType', 1) || this.findMethod('System.MonoType', 'MakeGenericType', 1) || this.findMethod('System.Type', 'MakeGenericType', 1);
     if (!mk) throw new Error('Type.MakeGenericType is not available in this build');
     const t = this.call(mk, this.typeObjectOfTd(td), this.typeArray(argTypes));
     const p = this._typeOfTypeObject(t);
@@ -402,7 +753,7 @@ export class Il2Cpp {
       if (!k) {
         // force class creation through RuntimeHelpers.RunClassConstructor
         const rc = this.findMethod('System.Runtime.CompilerServices.RuntimeHelpers', 'RunClassConstructor', 1);
-        if (rc) { try { this.invokeRaw(rc, 0, [p]); } catch (_) { /* ignore */ } }
+        if (rc) { try { this.call(rc, 0, p); } catch (_) { /* ignore */ } }
         k = this.cachedClass(p);
       }
       return k;
@@ -428,7 +779,7 @@ export class Il2Cpp {
     const defMi = arr ? this.mem.u32At(arr + local * 4) : 0;
     if (!this.mem.valid(defMi)) throw new Error(`no runtime MethodInfo for ${meta.name} (class not set up)`);
     const fromHandle = this.findMethod('System.Reflection.MethodBase', 'GetMethodFromHandle', 1);
-    const make = this.findMethod('System.Reflection.RuntimeMethodInfo', 'MakeGenericMethod', 1);
+    const make = this.findMethod('System.Reflection.RuntimeMethodInfo', 'MakeGenericMethod', 1) || this.findMethod('System.Reflection.MonoMethod', 'MakeGenericMethod', 1);
     if (!fromHandle || !make) throw new Error('reflection (MethodBase.GetMethodFromHandle / MakeGenericMethod) is not available in this build');
     const rmi = this.call(fromHandle, 0, defMi);
     const inst = this.call(make, rmi, this.typeArray(argTypes));
@@ -462,6 +813,12 @@ export class Il2Cpp {
   /** wasm table index of a method's code, or 0 (abstract, stripped, generic). */
   methodPointer(m) {
     if (m.genericContainerIndex !== -1) return 0;
+    const flat = this.reg.flat;
+    if (flat) {
+      // v24.0/24.1: one flat array, indexed by the method definition's methodIndex
+      const i = m.methodIndex;
+      return i >= 0 && i < flat.count ? this.mem.u32At(flat.pointers + i * 4) : 0;
+    }
     const img = this.md.imageOfType[m.declaringType];
     const mod = this.moduleOfImage[img];
     if (!mod) return 0;
@@ -495,10 +852,14 @@ export class Il2Cpp {
     if (strTd < 0 || objTd < 0) throw new Error('System.String not in metadata');
     this.td = { String: strTd, Object: objTd };
 
-    const fast = this.findMethod(strTd, 'FastAllocateString', 1);
+    // .NET 4.x profile: FastAllocateString; the legacy .NET 3.5 profile (Unity 2018): InternalAllocateStr
+    const fast = this.findMethod(strTd, 'FastAllocateString', 1) || this.findMethod(strTd, 'InternalAllocateStr', 1);
     if (!fast) throw new Error('String.FastAllocateString not found');
     this._fastAlloc = fast;
-    const s = this._rawCall(this.methodPointer(fast), [1]) >>> 0;
+    const fastSlot = this.slotOf(fast);
+    if (!fastSlot) throw new Error(`can't call String.FastAllocateString: ${this.desc(fast)._noSlot || 'no code'}`);
+    const fastD = this.desc(fast);
+    const s = this._rawCall(fastSlot, [...(this.staticThis ? [0] : []), 1, ...(fastD._dropMI ? [] : [0])]) >>> 0;
     if (!m.valid(s)) throw new Error('FastAllocateString returned ' + hex(s));
     const K = m.u32At(s);
     this.klass = { String: K };
@@ -542,15 +903,45 @@ export class Il2Cpp {
       if (m.valid(v) && m.u32At(v) === K && m.i32At(v + 8) === 0) { L.staticFields = o; break; }
     }
     // methods -> MethodInfo*[] { methodPointer, virtualMethodPointer, invoker, name, klass, return_type, parameters, ... }
-    const firstMethod = this.methodsOf(strTd)[0];
+    // Unity 2021.2+ (v29): { methodPointer, virtualMethodPointer, invoker, name, klass, ... }
+    // before that there is no virtualMethodPointer, so name sits at 8 instead of 12
+    const strMethods = this.methodsOf(strTd);
+    const firstMethod = strMethods[0];
     const mName = md.strAddr(firstMethod.nameIndex);
-    for (let o = L.fields; o < 200; o += 4) {
+    let nameOff = md.version >= 29 ? 12 : 8;
+    for (let o = L.fields; o < 200 && L.methods === undefined; o += 4) {
       const arr = m.u32At(K + o);
       if (!m.valid(arr)) continue;
       const mi = m.u32At(arr);
-      if (m.valid(mi) && m.u32At(mi + 12) === mName && m.u32At(mi + 16) === K) { L.methods = o; break; }
+      if (!m.valid(mi)) continue;
+      for (const n of [12, 8]) if (m.u32At(mi + n) === mName && m.u32At(mi + n + 4) === K) { L.methods = o; nameOff = n; break; }
     }
-    L.mi = { ptr: 0, vptr: 4, invoker: 8, name: 12, klass: 16, ret: 20, params: 24, token: 36, flags: 40, slot: 44, count: 46 };
+    if (nameOff === 12) {
+      L.mi = { ptr: 0, vptr: 4, invoker: 8, name: 12, klass: 16, ret: 20, params: 24, token: 36, flags: 40, slot: 44, count: 46, paramStride: 4, paramType: 0 };
+    } else {
+      // pre-2021.2: no virtualMethodPointer; parameters is a ParameterInfo[] { name, position, token, parameter_type }
+      L.mi = { ptr: 0, vptr: -1, invoker: 4, name: 8, klass: 12, ret: 16, params: 20, token: 32, flags: 36, slot: 40, count: 42, paramStride: 16, paramType: 12 };
+    }
+    if (L.methods !== undefined) {
+      const arr = m.u32At(K + L.methods);
+      const mi = m.u32At(arr);
+      // the token follows two unions (v24.0 had a customAttributeIndex in between)
+      for (let o = L.mi.ret + 8; o <= L.mi.ret + 24; o += 4) {
+        if (m.u32At(mi + o) === firstMethod.token && m.u16At(mi + o + 4) === firstMethod.flags) { Object.assign(L.mi, { token: o, flags: o + 4, slot: o + 8, count: o + 10 }); break; }
+      }
+      // parameters: Il2CppType*[] (2021.2+) or ParameterInfo[]; check on a String method that has one
+      for (let i = 0; i < strMethods.length && i < 64; i++) {
+        const meta = strMethods[i];
+        if (meta.parameterCount < 1) continue;
+        const mi2 = m.u32At(arr + i * 4);
+        if (!m.valid(mi2)) continue;
+        const pp = m.u32At(mi2 + L.mi.params);
+        if (!m.valid(pp)) continue;
+        const p0 = this.params(meta)[0];
+        if (m.u32At(pp) === p0.type) { L.mi.paramStride = 4; L.mi.paramType = 0; break; }
+        if (m.u32At(pp + 12) === p0.type || m.u32At(pp) === md.strAddr(p0.nameIndex)) { L.mi.paramStride = 16; L.mi.paramType = 12; break; }
+      }
+    }
     // Class table: Il2CppClass*[typeCount] indexed by type definition. Every String object also
     // starts with K, so a candidate only counts if a sample of its entries all name their typedef.
     m.views();
@@ -703,7 +1094,7 @@ export class Il2Cpp {
    * Returns { wasm: 'i32'|'i64'|'f32'|'f64'|'ptr'|'void', size, kind, td, struct? }
    *  - 'ptr' means "pass the address of a copy" (C ABI: aggregates by reference)
    */
-  abi(p) {
+  abi(p, isReturn = false) {
     const t = this.typeInfo(p);
     if (t.byref) return { wasm: 'i32', byref: true, kind: t.kind, size: 4 };
     switch (t.kind) {
@@ -719,7 +1110,11 @@ export class Il2Cpp {
           return { ...u, kind: t.kind, td, enumOf: u.kind };
         }
         const size = this.valueSize(td);
+        // LLVM wasm C ABI: a struct whose only member is a scalar travels as that scalar.
+        // fastcomp's asm.js ABI (Unity 2018 – 2021.1) passes structs by pointer, but still
+        // returns a one-scalar struct (TimeSpan, DateTime…) by value.
         const single = this._singleElement(td, 0);
+        if (single && this.flavor === 'fastcomp' && !isReturn) return { wasm: 'ptr', size, kind: t.kind, td, struct: true, singleByPtr: single };
         if (single) return { wasm: single.wasm, size, kind: t.kind, td, single };
         return { wasm: 'ptr', size, kind: t.kind, td, struct: true };
       }
@@ -758,19 +1153,21 @@ export class Il2Cpp {
     if (m.__desc) {
       if (m.generic) return m.meta && m.meta.genericContainerIndex !== -1 ? 'generic method (use .of(...types))' : 'method of a generic type (call it on an instance)';
       if (!m.ptr) return 'no code in this build';
-      for (const t of [m.retType, ...m.params.map((p) => p.type)]) { const a = this.abi(t); if (a.wasm === 'unsupported') return a.why; }
+      for (const [t, r] of [[m.retType, true], ...m.params.map((p) => [p.type, false])]) { const a = this.abi(t, r); if (a.wasm === 'unsupported') return a.why; }
+      if (!this.slotOf(m)) return m._noSlot || 'no code in this build';
       return null;
     }
     if (m.genericContainerIndex !== -1) return 'generic method';
     const td = this.md.typeDef(m.declaringType);
     if (td.isGeneric) return 'method of a generic type';
     if (!this.methodPointer(m)) return (m.flags & METHOD.ABSTRACT) ? 'abstract' : 'stripped from the build';
-    const ret = this.abi(this.typePtr(m.returnType));
+    const ret = this.abi(this.typePtr(m.returnType), true);
     if (ret.wasm === 'unsupported') return 'returns ' + ret.why;
     for (const p of this.params(m)) {
       const a = this.abi(p.type);
       if (a.wasm === 'unsupported') return `parameter ${p.name}: ${a.why}`;
     }
+    { const d = this.desc(m); if (!this.slotOf(d)) return d._noSlot || 'stripped from the build'; }
     return null;
   }
 
@@ -783,10 +1180,10 @@ export class Il2Cpp {
    */
   invokeRaw(m, self, args) {
     const d = this.desc(m);
-    const ptr = d.ptr;
+    const ptr = this.slotOf(d);
     if (!ptr) throw new Error(`${d.name}: no code (${this.whyNotCallable(d)})`);
     const isStatic = d.isStatic;
-    const ret = this.abi(d.retType);
+    const ret = this.abi(d.retType, true);
     const f = this.fn(ptr);
     const list = [];
     let retAddr = 0;
@@ -795,16 +1192,21 @@ export class Il2Cpp {
       this.mem.fill(retAddr, 0, ret.size);
       list.push(retAddr);
     }
-    if (!isStatic) list.push(self >>> 0);
+    if (this.hasThis(d)) list.push(isStatic ? 0 : self >>> 0);
     list.push(...args);
     list.push(d.mi >>> 0); // const MethodInfo* (needed by shared generic code)
-    if (f.length !== list.length) {
-      if (retAddr) this.free(retAddr);
-      throw new Error(`${m.name}: signature mismatch (expected ${list.length} wasm params, function takes ${f.length})`);
+    let cs = null;
+    if (f.length !== list.length || this.i64Mode !== 'native') {
+      // fastcomp builds: 64-bit values may be split in two (see callSig)
+      cs = this.callSig(d);
+      if (cs.error || f.length !== cs.params.length) {
+        if (retAddr) this.free(retAddr);
+        throw new Error(`${m.name}: ${cs.error || `signature mismatch (expected ${cs.params.length} wasm params, function takes ${f.length})`}`);
+      }
     }
     let value;
     try {
-      value = this._rawCall(ptr, list);
+      value = cs ? cs.retIn(this._rawCall(ptr, cs.split(list))) : this._rawCall(ptr, list);
     } catch (e) {
       if (retAddr) this.free(retAddr);
       throw e;
@@ -866,10 +1268,15 @@ export class Il2Cpp {
       case 'i64': return BigInt.asIntN(64, BigInt(v ?? 0));
       case 'f32': case 'f64': return Number(v ?? 0);
       case 'ptr': {
-        const buf = this.malloc(Math.max(a.size, 4));
+        const buf = this.malloc(Math.max(a.size, 8));
         temps.push(buf);
-        m.fill(buf, 0, a.size);
-        if (typeof v === 'number') m.copy(buf, v, a.size); // address of existing struct data
+        m.fill(buf, 0, Math.max(a.size, 8));
+        if (a.singleByPtr && (typeof v === 'number' || typeof v === 'bigint' || typeof v === 'boolean')) {
+          // a one-scalar struct (RuntimeTypeHandle, TimeSpan…) given as its value: same meaning as
+          // on LLVM builds, where it travels as that scalar; fastcomp wants it in memory
+          const w = a.singleByPtr.wasm;
+          if (w === 'i64') m.setI64(buf, BigInt(v)); else if (w === 'f32') m.setF32(buf, Number(v)); else if (w === 'f64') m.setF64(buf, Number(v)); else m.setU32(buf, typeof v === 'boolean' ? +v : Number(v));
+        } else if (typeof v === 'number') m.copy(buf, v, a.size); // address of existing struct data
         else if (v && typeof v === 'object') this.writeStruct(buf, a.td, v);
         return buf;
       }
@@ -926,7 +1333,8 @@ export class Il2Cpp {
 
   newString(str) {
     str = String(str);
-    const s = this._rawCall(this.methodPointer(this._fastAlloc), [str.length, 0]) >>> 0;
+    const fd = this.desc(this._fastAlloc);
+    const s = this._rawCall(this.slotOf(fd), [...(this.staticThis ? [0] : []), str.length, ...(fd._dropMI ? [] : [0])]) >>> 0;
     const m = this.mem.views();
     for (let i = 0; i < str.length; i++) m.setU16(s + 12 + i * 2, str.charCodeAt(i));
     return s;
@@ -1199,7 +1607,8 @@ export class Il2Cpp {
       this._getTypeFromHandle = this.findMethod('System.Type', 'GetTypeFromHandle', 1);
       if (!this._getTypeFromHandle) throw new Error('Type.GetTypeFromHandle not found');
     }
-    return this.invokeRaw(this._getTypeFromHandle, 0, [p]).value >>> 0;
+    // RuntimeTypeHandle is a one-field struct: call() passes it the right way for the toolchain
+    return this.call(this._getTypeFromHandle, 0, p) >>> 0;
   }
 
   typeObjectOfTd(td) { return this.typeObject(this.typePtr(this.md.typeDef(td).byvalTypeIndex)); }
@@ -1216,7 +1625,7 @@ export class Il2Cpp {
     }
     if (runCctor) {
       const rc = this.findMethod('System.Runtime.CompilerServices.RuntimeHelpers', 'RunClassConstructor', 1);
-      if (rc) this.invokeRaw(rc, 0, [this.typePtr(this.md.typeDef(td).byvalTypeIndex)]);
+      if (rc) this.call(rc, 0, this.typePtr(this.md.typeDef(td).byvalTypeIndex));
     }
     return k || this.klassOfTd(td);
   }

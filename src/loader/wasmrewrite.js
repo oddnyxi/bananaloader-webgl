@@ -61,7 +61,8 @@ export function slotMap(bytes, secs) {
     let offset = 0;
     const readOffset = () => {
       const op = r.u8();
-      if (op === 0x41) { offset = readSleb(r); } else if (op === 0x23) { r.leb(); offset = -1; } else throw new Error('unsupported element offset');
+      // fastcomp builds (Unity 2018 – 2021.1) place their one segment at the imported tableBase, which is 0
+      if (op === 0x41) { offset = readSleb(r); } else if (op === 0x23) { r.leb(); offset = 0; } else throw new Error('unsupported element offset');
       if (r.u8() !== 0x0b) throw new Error('bad element offset');
     };
     if (flags === 0) { readOffset(); const cnt = r.leb(); for (let k = 0; k < cnt; k++) { const f = r.leb(); if (offset >= 0) map.set(offset + k, f); } }

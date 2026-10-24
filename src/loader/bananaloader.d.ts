@@ -277,6 +277,28 @@ declare const BananaLoader: {
   readonly Il2Cpp: Il2CppApi;
   readonly il: any;
   readonly unity: any;
+  /** The shared Unity Bootstrap: what the page loaded and how the tools attached. */
+  readonly bootstrap: {
+    readonly state: { loader: { kind: string; label: string; era: string } | null; config: Record<string, any>; wasm: any; runtime: any; unsupported: string | null };
+    readonly facts: Map<string, string>;
+    /** Plain-text report: phases, build files, wasm, each tool's steps, environment, log. */
+    report(): string;
+    /** Record something for the loading screen and the report. */
+    fact(key: string, value: string): void;
+    /** Show the loading screen again. */
+    readonly ui: { reopen(): void };
+  };
+  /**
+   * The IntelliSense engine behind the console and editor (static: nothing is called).
+   * BananaLoader.complete('Camera.main.tr') → { from, to, items: [{ label: 'transform', kind: 'prop', detail: 'Transform { get; }' }] }
+   */
+  complete(text: string, caret?: number, ctx?: { roots?: Record<string, any>; bare?: boolean }): {
+    from: number; to: number; prefix: string;
+    items: { label: string; kind: string; detail?: string; insert?: string }[];
+    hint?: { sigs: { ret: string; text: string; params: string[] }[]; active: number };
+  } | null;
+  /** The loader window, once built. */
+  readonly app: any;
   find(name: string): Banan | null;
   enable(name: string): Promise<void>;
   disable(name: string): Promise<void>;

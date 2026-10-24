@@ -1,6 +1,9 @@
 // Editor tab: write and hot-reload Banans in the browser.
 import { h, icon } from '../ui/dom.js';
 import { B } from './brand.js';
+import { attachComplete } from '../ui/complete.js';
+import { Banan, BananPlugin } from '../loader/banan.js';
+import { Ref } from '../il2cpp/interop.js';
 
 export const TEMPLATE = `// ==Banan==
 // @name        My Banan
@@ -39,7 +42,15 @@ export class EditorView {
     this.dirty = false;
     this.ta.addEventListener('input', () => { this.dirty = true; this.lines(); this._status(); });
     this.ta.addEventListener('scroll', () => { this.gutter.scrollTop = this.ta.scrollTop; });
-    this.ta.addEventListener('keydown', (e) => this.key(e));
+    this.ac = attachComplete(this.ta, {
+      completer: () => this.loader.completer,
+      context: () => ({
+        roots: { Banan, BananPlugin, BananaLoader: this.loader.publicApi(), Il2Cpp: this.loader.Il2Cpp, logger: (this._logger ||= this.loader.hub.logger('editor')), Ref, module: { exports: {} } },
+        bare: true, unityFirst: false, thisProto: Banan.prototype, minPrefix: 2,
+        thisValues: { logger: (this._logger ||= this.loader.hub.logger('editor')), info: { name: '', version: '', author: '', description: '', games: [] } },
+      }),
+    });
+    this.ta.addEventListener('keydown', (e) => { if (this.ac.key(e)) return; this.key(e); });
     this.saveBtn = h('button.ue-btn.pri', { on: { click: () => this.save() } }, icon(B.save, 'i'), 'Save & reload');
     this.el = h('div.bl-view',
       h('div.ue-bar', this.sel,

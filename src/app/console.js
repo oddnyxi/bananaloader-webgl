@@ -1,6 +1,7 @@
 // Console tab: the loader log (MelonLoader's console window) plus a JavaScript prompt.
 import { h, icon, copy } from '../ui/dom.js';
 import { B } from './brand.js';
+import { attachComplete } from '../ui/complete.js';
 
 const LEVEL_CLASS = { msg: '', warning: 'warn', error: 'err', success: 'ok', debug: 'dbg', big: 'big' };
 
@@ -21,8 +22,12 @@ export class ConsoleView {
     lvl.onchange = () => { this.level = lvl.value; this.redraw(); };
     const search = h('input.ue-in', { placeholder: 'Filter', spellcheck: false });
     search.oninput = () => { this.query = search.value.toLowerCase(); this.redraw(); };
-    this.input = h('textarea.ue-in', { placeholder: 'JavaScript — BananaLoader, Il2Cpp, il, unity and banans are in scope. Enter runs, Shift+Enter adds a line.', spellcheck: false, rows: 1 });
-    this.input.addEventListener('keydown', (e) => this.key(e));
+    this.input = h('textarea.ue-in', { placeholder: 'JavaScript — type names (Camera.main), Il2Cpp, il, unity, banans. Ctrl+Space completes, Enter runs.', spellcheck: false, rows: 1 });
+    this.ac = attachComplete(this.input, {
+      completer: () => this.loader.completer,
+      context: () => ({ roots: this.scope(), bare: true, unityFirst: true }),
+    });
+    this.input.addEventListener('keydown', (e) => { if (this.ac.key(e)) return; this.key(e); });
     this.input.addEventListener('input', () => { this.input.style.height = 'auto'; this.input.style.height = Math.min(160, this.input.scrollHeight) + 'px'; });
     this.el = h('div.con',
       h('div.ue-bar', this.srcSel, lvl, h('div.ue-search', { html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>' }, search),
@@ -82,6 +87,18 @@ export class ConsoleView {
     else if (e.key === 'ArrowDown' && !this.input.value.includes('\n') && this.hist.length) { e.preventDefault(); this.hpos = Math.min(this.hist.length, this.hpos + 1); this.input.value = this.hist[this.hpos] || ''; }
   }
 
+  scope() {
+    const L = this.loader;
+    return {
+      BananaLoader: L.publicApi(),
+      Il2Cpp: L.Il2Cpp,
+      il: L.il,
+      unity: L.unity,
+      banans: Object.fromEntries([...L.entries.values()].filter((e) => e.instance).map((e) => [e.info.name.replace(/\W+/g, '_'), e.instance])),
+      inspect: (x) => this.app.inspect(x),
+    };
+  }
+
   run() {
     const code = this.input.value.trim();
     if (!code) return;
@@ -92,21 +109,15 @@ export class ConsoleView {
     const L = this.loader;
     const con = L.hub.logger('>', '#93c5fd');
     con.msg(code);
-    const scope = {
-      BananaLoader: L.publicApi(),
-      Il2Cpp: L.Il2Cpp,
-      il: L.il,
-      unity: L.unity,
-      banans: Object.fromEntries([...L.entries.values()].filter((e) => e.instance).map((e) => [e.info.name.replace(/\W+/g, '_'), e.instance])),
-      inspect: (x) => this.app.inspect(x),
-    };
+    const scope = this.scope();
     const keys = Object.keys(scope);
     let fn;
-    try { fn = new Function(...keys, `return (${code}\n);`); } catch (_) {
-      try { fn = new Function(...keys, code); } catch (e) { con.error(String(e)); return; }
+    try { fn = compileWithTypes(keys, `return (${code}\n);`); } catch (_) {
+      try { fn = compileWithTypes(keys, code); } catch (e) { con.error(String(e)); return; }
     }
     try {
-      const r = fn(...keys.map((k) => scope[k]));
+      const types = L.interop ? L.interop.typeScope({ unityFirst: true }) : Object.create(null);
+      const r = fn(types)(...keys.map((k) => scope[k]));
       Promise.resolve(r).then((v) => { if (v !== undefined) con.msg(show(v)); }, (e) => con.error(String(e && e.message || e)));
     } catch (e) { con.error(String(e && e.message || e)); }
   }
@@ -125,3 +136,9 @@ function show(v) {
 }
 
 const fmtLine = (l) => `[${l.time.toISOString().slice(11, 23)}] [${l.source}] ${l.text}`;
+
+/** Console code with bare type names: scope helpers are parameters (they win), `with` supplies types. */
+function compileWithTypes(keys, body) {
+  // eslint-disable-next-line no-new-func
+  return new Function('__types', `with (__types) { return function (${keys.join(', ')}) {\n${body}\n}; }`);
+}

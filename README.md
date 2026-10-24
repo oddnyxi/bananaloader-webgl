@@ -6,8 +6,8 @@
 
 **MelonLoader for Unity WebGL games, in JavaScript. Mods are called Banans: drop in a `.js` file and it hooks into the game's lifecycle, patches IL2CPP methods Harmony-style and reads and writes game objects like C#.**
 
-![Unity](https://img.shields.io/badge/Unity-2021.2%20%E2%86%92%206000-e11d2e)
-![IL2CPP](https://img.shields.io/badge/IL2CPP-v29%20%2F%20v31-8250df)
+![Unity](https://img.shields.io/badge/Unity-2018.1%20%E2%86%92%206000-e11d2e)
+![IL2CPP](https://img.shields.io/badge/IL2CPP-v24%20%E2%86%92%20v31-8250df)
 ![Mods](https://img.shields.io/badge/mods-JavaScript-f5c518)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-2ea043)
 ![License](https://img.shields.io/badge/license-MIT%20%2B%20attribution-lightgrey)
@@ -20,11 +20,13 @@
 
 - [What it is](#what-it-is)
 - [Install](#install)
+- [Bootstrap](#bootstrap)
 - [Your first Banan](#your-first-banan)
 - [MelonLoader → BananaLoader](#melonloader--bananaloader)
 - [The Banan header](#the-banan-header)
 - [Lifecycle](#lifecycle)
 - [Il2Cpp interop](#il2cpp-interop)
+- [IntelliSense](#intellisense)
 - [Generics](#generics)
 - [Patching (Harmony)](#patching-harmony)
 - [Dependencies](#dependencies)
@@ -37,9 +39,11 @@
 - [The window](#the-window)
 - [Example Banans](#example-banans)
 - [How it works](#how-it-works)
+- [Compatibility](#compatibility)
 - [Limitations](#limitations)
 - [Building](#building)
 - [Project structure](#project-structure)
+- [Changelog](#changelog)
 - [License](#license)
 
 ## What it is
@@ -47,7 +51,8 @@
 [MelonLoader](https://github.com/LavaGang/MelonLoader) loads C# mods into Unity games on desktop. Unity WebGL games run IL2CPP compiled to WebAssembly in a browser tab, so there's nothing for MelonLoader to inject into. BananaLoader is the same idea built for the browser:
 
 - **Banans** are JavaScript mods with MelonLoader's lifecycle: `onInitializeBanan`, `onSceneWasLoaded`, `onUpdate`, `onGUI` and the rest.
-- **Il2Cpp interop:** game types and objects behave like JS objects, so `Il2Cpp.type('UnityEngine.Time').timeScale = 0.5` works.
+- **Il2Cpp interop:** game types and objects behave like JS objects, so `Time.timeScale = 0.5` and `Camera.main.transform.position` work.
+- **IntelliSense in the editor and console:** type `Camera.` and `main` is in the list; members, struct fields, enum values, type names and method signatures complete as you type. See [IntelliSense](#intellisense).
 - **Harmony-style patches on every method:** prefixes and postfixes on IL2CPP methods, including non-virtual ones that game code calls directly. Prefixes can skip the original or replace the result.
 - **Generics:** `List<int>`, `Dictionary<string, Player>`, `GetComponent<T>()`. You can call them, construct them and patch them.
 - **Dependencies:** a Banan can `@require` another one (with a version range) and use its API.
@@ -56,6 +61,8 @@
 - **Hot reload:** edit a Banan in the built-in editor and press <kbd>Ctrl</kbd>+<kbd>S</kbd>; it unloads (patches, tabs and timers included) and loads again without restarting the game.
 - **Built-in Unity Explorer:** browse the scene, inspect objects and call methods, in the same window. Click an object in the game view to select it.
 - **Odium UI:** black and red, toggled with <kbd>F8</kbd>.
+- **Unity 2018.1 to 6000:** IL2CPP metadata v24.0 to v31, old Emscripten fastcomp builds (Unity 2018 – 2021.1) and LLVM builds (2021.2+), and both the `UnityLoader.js` and `createUnityInstance` loaders.
+- **Bootstrap loading screen:** an animated loading screen with every boot phase, download, compile and attach step while the game loads. See [Bootstrap](#bootstrap).
 
 ## Install
 
@@ -65,6 +72,42 @@
 4. Drop the files from [`examples/`](examples) onto the window to try it out.
 
 The userscript runs at `document-start` on every page but only shows up where a Unity WebGL build is running. To keep it to one site, change `@match`.
+
+## Bootstrap
+
+A bootstrap runs first, at `document-start`, before the game's own scripts. It watches the game load, shows a loading screen while it does, and only then hands over to BananaLoader. If Unity Explorer and BananaLoader are both installed, they share one bootstrap and one loading screen, and each shows up as a tool with its own steps.
+
+| | |
+| --- | --- |
+| ![Loading screen](docs/images/bootstrap.png) **Loading**: boot phases, live progress, and each tool's steps as they attach | ![Loading screen details](docs/images/bootstrap-details.png) **Details**: every build file, the runtime, the environment and a log |
+
+The loading screen shows:
+
+- **Boot sequence.** Detect the Unity build, download the build files, compile the WebAssembly, start the Unity runtime, attach the tools. Each phase has its timing and what it found (loader API, file count and size, wasm size and compile time, Emscripten toolchain, heap size).
+- **Tools.** Every IL2CPP step, timed, with its result: the metadata version and which Unity versions use it, where the registrations are, the calibrated `Il2CppClass` / `MethodInfo` layout, the calling convention, how many engine methods survived stripping, and BananaLoader's own steps (reading installed Banans, loading them, building the interop, running `onInitializeBanan`).
+- **Details** (click **Details**):
+  - **Build files**: every build file with its kind, size, live progress, encoding, `fetch` or `XHR`, and timing.
+  - **Runtime**: product, company, Unity version, loader, toolchain, wasm size and compile mode, memory, function table, import/export counts and the wasm analysis.
+  - **Environment**: browser, threads, RAM, cross-origin isolation and BigInt support.
+  - **Log**: a timestamped log of everything above.
+- **Copy report** puts all of it on the clipboard as text, for bug reports.
+
+When everything is attached, the screen folds into a small pill in the corner and fades out, and the tool's window appears. You can open the window earlier with its hotkey. If something fails, the screen turns into a corner card that says what went wrong, so it never covers a game that is running. The dimmed backdrop never blocks clicks. Under **Settings → Loading screen** you can switch to a corner card or turn the screen off. **Show loading screen** brings it back.
+
+The bootstrap only observes, and it runs on every page, so it follows three rules:
+
+1. **Every call goes through unchanged.** The page gets its own promises and `Response` objects. Download progress and the wasm bytes are read from clones, so URLs, caching and the browser's compiled-code cache behave as they normally would.
+2. **Nothing beyond pass-through until there's proof of Unity.** That means a call to a Unity loader, or an Emscripten `Module` that belongs to Unity. Other wasm libraries on the page (Draco, Basis, physics engines) are told apart from the game.
+3. **The bootstrap's own bookkeeping can never throw into the page.**
+
+On pages without Unity, the one global hook (`Object.prototype.asm`) is removed a few seconds after the page loads, and nothing is shown.
+
+| It hooks | To learn |
+| --- | --- |
+| `UnityLoader.instantiate` (Unity 5.6 – 2019.4) and `createUnityInstance` (2020.1+) | which loader, the build config, Unity's own progress, the game instance |
+| `fetch` and `XMLHttpRequest`, for build files only | file sizes, encodings, download progress, the `Build/*.json` manifest |
+| `WebAssembly.instantiate` / `instantiateStreaming` | compile time, the module's memory and function table, and the wasm bytes (analysed for exact function signatures) |
+| `Module.asm` and `Module.postRun` | when the Emscripten runtime has its exports, and when `main()` has run |
 
 ## Your first Banan
 
@@ -160,7 +203,17 @@ A Banan enabled or installed while the game is running catches up: it gets every
 
 ## Il2Cpp interop
 
-`Il2Cpp` turns game types and objects into JavaScript proxies, built from the game's metadata at runtime:
+`Il2Cpp` turns game types and objects into JavaScript proxies, built from the game's metadata at runtime. Type names can be written directly, as in C#:
+
+```js
+Time.timeScale = 0.5;                                 // UnityEngine.Time
+Camera.main.transform.position;                       // { x, y, z }
+UnityEngine.SceneManagement.SceneManager.sceneCount;  // full names and namespaces work too
+```
+
+A bare name means the matching type, preferring `UnityEngine`, then the game's assemblies (`Assembly-CSharp`), then `System`. In Banans, names the browser already defines keep their browser meaning, so existing code that uses `Image`, `Event` or `Screen` is unaffected; use the full name (`UnityEngine.Screen.width`) or `Il2Cpp.type('UnityEngine.Screen')` for those. In the console, the Unity type wins over browser globals other than the JavaScript built-ins. Your own variables and the Banan scope always win.
+
+The explicit form works everywhere and takes generic names:
 
 ```js
 const Time = Il2Cpp.type('UnityEngine.Time');
@@ -199,6 +252,31 @@ Il2Cpp.type('System.Int32').TryParse('42', out);      // true, out.value === 42
 Arrays are proxies too: index into them, read `length`, or use `for…of`.
 
 Values convert like this: strings ↔ JS strings, numbers, booleans, `long` ↔ BigInt, enums ↔ numbers, structs ↔ plain objects, and objects ↔ proxies (`null` for null). The raw bridge is still there as `Il2Cpp.il`, along with the scene helpers as `Il2Cpp.unity`.
+
+## IntelliSense
+
+The editor and the console prompt complete as you type:
+
+![IntelliSense: completing members of Transform](docs/images/intellisense.png)
+
+| You type | You get |
+| --- | --- |
+| `Camera.` | static members: `main`, `allCameras`, `GetAllCameras(…)`, nested types |
+| `Camera.main.transform.` | `Transform` members, inherited ones included |
+| `Camera.main.transform.position.` | struct fields `x`, `y`, `z` |
+| `KeyCode.` | enum values with their numbers |
+| `UnityEngine.` | namespaces and types |
+| `Il2Cpp.type('Cam` / `$component('` / `.of('` | full type names |
+| `Il2Cpp.method('UnityEngine.Time::` | members of that type, accessors included (for patches) |
+| `transform.Rotate(5, ` | every overload, the current parameter underlined |
+| `const cam = Camera.main;` … `cam.` | locals, `for (const x of …)` and `this.x = …` are followed |
+| `this.` | Banan members (`logger`, `pref`, `createTab`, …) and fields you assigned |
+
+Types follow through fields, property getters and method results, with generic arguments filled in (`List<Enemy>.Find(…)` returns `Enemy`). <kbd>Tab</kbd> or <kbd>Enter</kbd> accepts, <kbd>↑</kbd>/<kbd>↓</kbd> choose, <kbd>Esc</kbd> closes, <kbd>Ctrl</kbd>+<kbd>Space</kbd> opens the list anywhere.
+
+It's static: completion reads the metadata and never calls a getter or a method while you type. It lists what the build contains, so members Unity stripped from the build (a game that never uses `Camera.main` has no `get_main`) aren't offered.
+
+The same engine is available as `BananaLoader.complete('Camera.main.tr')` for external tools. For VS Code, export a `.d.ts` instead (see [TypeScript](#typescript)).
 
 ## Generics
 
@@ -409,20 +487,38 @@ The **Scene** and **Classes** tabs are Unity Explorer, built in: a hierarchy, an
 
 ## How it works
 
-1. **Attach.** A `document-start` hook catches the Emscripten `Module` the moment the framework assigns `Module.asm`, before the game's `main` runs. Banans are read from IndexedDB in the meantime, and their `onPreInitialize` runs right there.
+1. **Attach.** The [bootstrap](#bootstrap) catches the Emscripten `Module` the moment the framework assigns `Module.asm`, before the game's `main` runs. Banans are read from IndexedDB in the meantime, and their `onPreInitialize` runs right there. IL2CPP attaches once `main()` has run (the bootstrap's `Module.postRun` hook).
 2. **IL2CPP bridge** (shared with Unity Explorer):
-   - `global-metadata.dat` is read straight out of the heap. It holds the name of every type, method, field and property.
-   - `Il2CppCodeRegistration` maps each method to its index in the wasm function table.
-   - The `Il2CppClass` layout is worked out by testing it against `System.String`.
-   - Methods are called directly with IL2CPP's calling convention.
+   - `global-metadata.dat` is read straight out of the heap. It holds the name of every type, method, field and property. Its layout (v24.0 to v31) is worked out from record sizes.
+   - `Il2CppCodeRegistration` maps each method to its code: through per-assembly code modules (Unity 2019.2+) or one flat `methodPointers` array (Unity 2018).
+   - The `Il2CppClass` and `MethodInfo` layouts are worked out by testing them against `System.String`.
+   - Methods are called directly with IL2CPP's calling convention. On fastcomp builds (Unity 2018 – 2021.1), every signature has its own sub-table inside the wasm table. The bridge reads their offsets from the build's `dynCall_*` functions, along with fastcomp's struct ABI, the `MethodInfo*` arguments the optimizer dropped, and the dummy `this` static methods took before Unity 2018.3.
 3. **Frames.** BananaLoader chains Emscripten's `Module.postMainLoop`, so `onUpdate` and the rest run right after each Unity frame, which is also when it's safe to call into managed code.
 4. **Patching.**
-   - A tiny wasm module is generated that imports the JS hook and re-exports it with the method's exact wasm signature (the same trick as Emscripten's `addFunction`).
+   - A tiny wasm module is generated that imports the JS hook and re-exports it with the method's exact wasm signature (the same trick as Emscripten's `addFunction`). The signature comes from the game's own wasm binary, which the bootstrap reads while the game loads. Banans still get the IL-level arguments, even where fastcomp split a `long` in two or dropped the `MethodInfo*`.
    - The method's slot in the function table is swapped for that function. Every indirect call (vtables, `MethodInfo`, delegates, invokers) now lands in the hook, and the original is kept to call through to.
    - Unpatching swaps the original back in.
    - Shared generic code is told apart by the `MethodInfo*` IL2CPP passes as the last argument.
    - **Direct calls.** `WebAssembly.instantiateStreaming` is hooked at `document-start`. When patches need it, the code section is decoded and each `call f` to a patched function becomes `i32.const slot; call_indirect`, which is the same call through the table, so it lands in the hook. Nothing else in the module changes.
 5. **Scenes.** BananaLoader patches `SceneManager.Internal_SceneLoaded` and `Internal_SceneUnloaded`, which the engine calls for every load. If a build lacks them, it polls instead.
+
+## Compatibility
+
+BananaLoader shares Unity Explorer's IL2CPP bridge, so it runs on the same Unity versions: **2018.1 through 6000.x** WebGL builds that use WebAssembly. That means metadata v24.0 to v31, Emscripten fastcomp builds (Unity 2018 – 2021.1) and LLVM builds (2021.2+), and both the `UnityLoader.js` and `createUnityInstance` loaders. asm.js builds aren't supported, and the loading screen says so.
+
+Tested end to end in headless Chromium, with both tools, on public WebGL builds from each era. For each build, every method's resolved function was also checked against the build's own wasm: for example, `Math.Sqrt` has to land on a function containing `f64.sqrt`.
+
+| Test build | Unity | Metadata | Toolchain · loader | Checked |
+| --- | --- | --- | --- | --- |
+| MaskShader | 2018.2.6f1 | v24.0 | fastcomp · `UnityLoader.js` | static `this` detected; string, float, int and `out` calls; generic types |
+| apartment | 2018.3.6f1 | v24.1 | fastcomp · `UnityLoader.js` | 502 GameObjects via `FindObjectsOfType`, transforms, components, a BananaLoader patch |
+| InterceptExample | 2019.3.0f6 | v24.2 | fastcomp · `UnityLoader.js` | calls, generic types, both tools on one page |
+| HealthBarExample | 2020.1.6f1 | v24.2 | fastcomp · `createUnityInstance` | 81 GameObjects (verified heap scan), components |
+| unity-webgl-deploy | 2020.3.9f1 | v27 | fastcomp · `createUnityInstance` | attach, calls, generic types |
+| SpaceTest | 2021.3.14f1 | v29 | LLVM · `createUnityInstance` | attach, calls, `out` parameters |
+| UVMapping | 2023.1.18f1 | v29 | LLVM · `createUnityInstance` | attach, calls, `out` parameters |
+
+The 2018.3 build was also tested with the userscript injected after the game had started. Most of these demos strip whatever engine APIs they don't use, so some scene features depend on what a game kept.
 
 ## Limitations
 
@@ -430,6 +526,7 @@ The **Scene** and **Classes** tabs are Unity Explorer, built in: a hierarchy, an
 - **Generic instantiations the game never used.** IL2CPP only compiles the generic instantiations the game needs (plus shared reference-type code). `List<MyStruct>` works only if the game uses it.
 - **Stripped code.** Anything the game never used isn't in the build. Accessing a stripped member returns `undefined`, and calling one throws a clear error.
 - **Scene names.** If a build strips the scene-name APIs, scenes are reported as `Scene <handle>`.
+- **Injected after the game started.** If BananaLoader is injected into a game that's already running, it can't see the wasm compile, so it downloads the wasm again from the cache. On fastcomp builds (Unity 2018 – 2021.1), patching needs the exact signatures it gets from that file, and direct calls can't be rewritten until the page reloads.
 - **Banans run in the page with the game's privileges.** Only install Banans you trust, just as you would with DLL mods.
 
 ## Building
@@ -444,12 +541,13 @@ bun scripts/build.js --readable  # unminified
 ```
 bananaloader/
 ├── src/
-│   ├── main.js              entry: hooks, loader, window
-│   ├── hook.js              document-start: Module capture, key shield
+│   ├── main.js              entry: bootstrap, hooks, loader, window
+│   ├── hook.js              document-start: direct-call wasm rewrite, key shield
+│   ├── bootstrap/           document-start bootstrap and loading screen (shared with Unity Explorer)
 │   ├── loader/
 │   │   ├── loader.js        Banan lifecycle, scenes, frames, install/reload
 │   │   ├── banan.js         Banan / BananPlugin base classes, header parser, compiler
-│   │   ├── interop.js       Il2Cpp proxies
+│   │   ├── interop.js       re-export of il2cpp/interop.js
 │   │   ├── patcher.js       Harmony-style patching through the function table
 │   │   ├── wasmfn.js        JS function -> typed wasm function
 │   │   ├── wasmrewrite.js   direct call -> call_indirect rewriting of the game's wasm
@@ -461,12 +559,32 @@ bananaloader/
 │   │   ├── overlay.js       onGUI canvas
 │   │   └── store.js         IndexedDB and linked folder
 │   ├── app/                 the window: Banans, Console, Preferences, Patches, Editor, Settings
-│   ├── il2cpp/              IL2CPP bridge (from Unity Explorer)
-│   ├── ui/                  explorer views and the in-game picker (shared with Unity Explorer)
+│   ├── il2cpp/              IL2CPP bridge, metadata v24.0 – v39, Il2Cpp proxies, IntelliSense engine (shared with Unity Explorer)
+│   ├── dumper/              Odium Dumper: dump.cs, named wasm, script.json
+│   ├── ui/                  explorer views, the in-game picker and the autocomplete popup (shared with Unity Explorer)
 │   └── odium/               Odium UI
 ├── examples/                example Banans
 └── scripts/build.js
 ```
+
+## Changelog
+
+### 1.3.0
+
+- **IntelliSense** in the Banan editor and the console: type names, namespaces, static and instance members (inherited ones included), struct fields, enum values, type names inside `Il2Cpp.type('…')`, `$component('…')` and `.of('…')`, and signature help with every overload. Locals, `for…of` variables and `this.x = …` assignments are followed. Static only: nothing runs while you type. Also exposed as `BananaLoader.complete(text)`.
+- **Bare type names** in Banans and the console: `Camera.main`, `Time.timeScale = 0.5`, `UnityEngine.Time`. In Banans, browser globals (`Image`, `Event`, …) keep their meaning, so existing Banans behave the same. Banans still run in strict mode.
+- Struct values use property names for auto-property backing fields (`{ Count }` instead of `{ '<Count>k__BackingField' }`); writes accept either.
+- The interop layer moved to `src/il2cpp/interop.js` and is shared with Unity Explorer (whose console now has `Il2Cpp` too). `loader/interop.js` re-exports it.
+
+### 1.2.0
+
+- **Older Unity versions.** Unity 2018.1 – 2021.1 now work, as well as 2021.2+. This adds IL2CPP metadata v24.0 – v27, Emscripten fastcomp builds and the `UnityLoader.js` loader. Patching on those builds uses the exact wasm signature of each function table slot.
+- **Bootstrap.** A shared `document-start` bootstrap with an animated loading screen: boot phases, build file downloads, WebAssembly compile, each IL2CPP and BananaLoader step with timings, runtime and environment details, a log, and a copyable report. Settings: **Loading screen** (full screen, corner card, off), **Show loading screen** and **Copy bootstrap report**. `BananaLoader.bootstrap` exposes it to Banans.
+- **Fix: Unity 2018 – 2020 froze on attach.** Emscripten's `Module` has a `then()` method on those versions, so resolving a Promise with it looped forever.
+- **Fix: with Unity Explorer on the same page,** BananaLoader's direct-call rewriting hook could be skipped. Each tool now keeps its own hooks, and they share the bootstrap.
+- **Fix: direct-call rewriting on fastcomp builds,** whose function table segment sits at an imported `tableBase`.
+- **Fix: heap-scan fallback could crash the game.** When a build strips every `FindObjectsOfType` variant, GameObjects are found by scanning the heap. Stale memory that only looked like an object could be passed to the engine, which aborted. Each candidate's native object now has to point back at it.
+- **Fix: `System.Type` arguments on fastcomp builds.** `RuntimeTypeHandle` and other one-field structs are passed by pointer there. This affected `FindObjectsOfType`, `GetComponents` and `MakeGenericType`.
 
 ## License
 

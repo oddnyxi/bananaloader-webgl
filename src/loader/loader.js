@@ -1,13 +1,14 @@
 // BananaLoader core: finds Banans, runs their lifecycle against the game's frame loop,
 // tracks scenes, and owns the patcher, preferences, coroutines and GUI overlay.
 
-import { installHooks, detectUnity, waitForModule } from '../hook.js';
+import { getBootstrap, prepareIl2Cpp } from '../bootstrap/index.js';
 import { Il2Cpp } from '../il2cpp/runtime.js';
 import { UnityApi } from '../il2cpp/unity.js';
 import { ValueFormatter } from '../il2cpp/values.js';
 import { Banan, BananPlugin, parseHeader, compile, instantiate, slug } from './banan.js';
 import { Patcher } from './patcher.js';
 import { Interop, Ref } from './interop.js';
+import { Completer } from '../il2cpp/complete.js';
 import { Preferences } from './prefs.js';
 import { LogHub } from './logger.js';
 import { Store } from './store.js';
@@ -16,7 +17,8 @@ import { Overlay } from './overlay.js';
 import { TypeGen } from './typegen.js';
 import { liveDump } from '../dumper/live.js';
 
-export const VERSION = '1.1.0';
+export const VERSION = '1.3.0';
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const SETTINGS_KEY = 'bananaloader:settings';
 const STAGES = ['boot', 'pre', 'started', 'initialized', 'late'];
 const PALETTE = ['#f5c518', '#4ade80', '#60a5fa', '#f472b6', '#a78bfa', '#fb923c', '#2dd4bf', '#facc15', '#f87171', '#38bdf8'];
@@ -52,14 +54,24 @@ export class BananaLoader {
 
   // ------------------------------------------------------------------ boot
 
-  /** Runs at document-start. Resolves with the game's Module once a Unity game is detected. */
+  /**
+   * Runs at document-start. Joins the shared bootstrap (which shows the loading screen) and
+   * resolves with { Module } once a Unity game is detected and its exports exist.
+   */
   async boot() {
-    installHooks();
+    const boot = (this.bootstrap = getBootstrap());
+    this.client = boot.client({ id: 'bananaloader', name: 'BananaLoader', version: VERSION, color: '#f5c518', expectedSteps: 11 });
     const recordsP = this.readRecords().catch((e) => { this.log.error('could not read installed Banans:', e); return []; });
-    const M = await detectUnity();
-    const records = await recordsP;
+    await boot.whenDetected();
+    const records = await this.client.run('records', 'Read installed Banans', async (note) => {
+      const r = await recordsP;
+      note(`${r.length} installed${r.some((x) => x.origin === 'folder') ? ' · linked folder' : ''}${this.settings.safeMode ? ' · safe mode' : ''}`);
+      return r;
+    });
     for (const r of records) this._addEntry(r);
-    return M;
+    await boot.whenModule();
+    // wrapped: on Unity 2018 – 2020 the Module is a thenable, so it can't be a promise's value
+    return { Module: boot.Module };
   }
 
   async readRecords() {
@@ -122,9 +134,15 @@ export class BananaLoader {
     this.stage = 'pre';
     this.emit('stage');
     const list = this.ordered();
-    if (this.settings.safeMode) this.log.warn('Safe mode is on: no Banans are loaded.');
-    else for (const e of list) if (e.rec.enabled !== false) this.load(e, { quiet: true });
-    waitForModule().then(() => this.initIl2Cpp());
+    const st = this.client.step('load', 'Load Banans');
+    if (this.settings.safeMode) { this.log.warn('Safe mode is on: no Banans are loaded.'); st.skip('safe mode: none loaded'); }
+    else {
+      for (const e of list) if (e.rec.enabled !== false) this.load(e, { quiet: true });
+      const failed = list.filter((e) => e.state === 'error');
+      const ok = list.filter((e) => e.state === 'loaded');
+      st.done(`${ok.length} loaded${failed.length ? ` · ${failed.length} failed` : ''}${list.length - ok.length - failed.length ? ` · ${list.length - ok.length - failed.length} skipped` : ''} · onPreInitialize`);
+    }
+    this.bootstrap.whenRuntime().then(() => this.initIl2Cpp());
   }
 
   /** Plugins first, then mods, each by name. */
@@ -189,31 +207,65 @@ export class BananaLoader {
     return null;
   }
 
-  initIl2Cpp(attempt = 0) {
+  async initIl2Cpp() {
+    const c = this.client;
+    const boot = this.bootstrap;
+    const failed = (e) => { this.log.error('IL2CPP bridge failed:', e.message || e); c.fail(e); this.emit('failed', e); };
+    if (boot.state.unsupported) { failed(new Error(boot.state.unsupported)); return; }
+    let hints;
     try {
-      const il = new Il2Cpp(this.Module, (m) => this.log.debug(m));
-      il.init();
-      this.il = il;
-    } catch (e) {
-      if (attempt < 60 && /metadata not found/.test(e.message)) { setTimeout(() => this.initIl2Cpp(attempt + 1), 1000); return; }
-      this.log.error('IL2CPP bridge failed:', e.message || e);
-      this.emit('failed', e);
-      return;
+      const prep = c.step('prepare', 'Prepare the IL2CPP bridge');
+      hints = await prepareIl2Cpp(boot, prep);
+      prep.done(hints.fnTables ? `fastcomp build · ${hints.fnTables.size} per-signature function tables` : hints.flavor === 'fastcomp' ? 'fastcomp build · function tables unavailable' : 'LLVM build · direct function pointers');
+    } catch (e) { failed(e); return; }
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const il = new Il2Cpp(this.Module, (m) => this.log.debug(m), hints);
+        await il.initAsync(c);
+        this.il = il;
+        break;
+      } catch (e) {
+        if (attempt < 60 && /metadata not found/.test(e.message)) {
+          c.step('metadata', 'Locate global-metadata.dat').wait(`not in memory yet, retrying (${attempt + 1})`);
+          await sleep(1000);
+          continue;
+        }
+        failed(e);
+        return;
+      }
     }
-    try { this.unity = new UnityApi(this.il); } catch (e) { this.log.error('UnityEngine not found:', e.message); this.emit('failed', e); return; }
-    this.fmt = new ValueFormatter(this.il, this.unity);
-    this.interop = new Interop(this.il, this.unity, this.fmt);
-    this.Il2Cpp = this.interop.api();
+    try {
+      c.run('unity', 'Resolve the UnityEngine API', (note) => {
+        this.unity = new UnityApi(this.il);
+        const keys = Object.keys(UnityApi.CANDIDATES);
+        note(`${keys.filter((k) => this.unity.has(k)).length}/${keys.length} engine methods available`);
+      });
+      c.run('interop', 'Build Il2Cpp interop', (note) => {
+        this.fmt = new ValueFormatter(this.il, this.unity);
+        this.interop = new Interop(this.il, this.unity, this.fmt);
+        this.Il2Cpp = this.interop.api();
+        this.completer = new Completer({ il: this.il, index: this.interop.index, api: this.Il2Cpp });
+        note('Il2Cpp.type · find · patch · generics · IntelliSense');
+      });
+    } catch (e) { failed(e); return; }
     this.game.unity = this._unityVersion();
+    boot.fact('Unity', this.game.unity !== 'unknown' ? this.game.unity : null);
+    boot.fact('IL2CPP', `metadata v${this.il.md.versionLabel}`);
     this._banner();
 
-    this.stage = 'started';
-    for (const e of this.loaded()) if (e.info.type === 'plugin') this.safe(e.instance, 'onApplicationStarted');
-    this.stage = 'initialized';
-    for (const e of this.loaded()) this.safe(e.instance, 'onInitializeBanan');
-    this._trackScenes();
-    this.emit('stage');
-    this._lateNext = true;
+    c.run('init', 'Initialize Banans', (note) => {
+      this.stage = 'started';
+      for (const e of this.loaded()) if (e.info.type === 'plugin') this.safe(e.instance, 'onApplicationStarted');
+      this.stage = 'initialized';
+      for (const e of this.loaded()) this.safe(e.instance, 'onInitializeBanan');
+      this._trackScenes();
+      this.emit('stage');
+      this._lateNext = true;
+      const n = this.loaded().length;
+      note(`${n} Banan${n === 1 ? '' : 's'} initialized · ${this.scenes.size} scene${this.scenes.size === 1 ? '' : 's'} tracked`);
+    });
+    const n = this.loaded().length;
+    c.ready(`${n} Banan${n === 1 ? '' : 's'} · press ${this.settings.toggleKey || 'F8'}`);
   }
 
   _unityVersion() {
@@ -237,7 +289,7 @@ export class BananaLoader {
     L.big('------------------------------');
     L.big(`BananaLoader v${VERSION}`);
     L.msg(`Game: ${this.game.product || 'Unknown'}${this.game.company ? ` (${this.game.company})` : ''}${this.game.version ? ` v${this.game.version}` : ''}`);
-    L.msg(`Unity ${this.game.unity} · IL2CPP metadata v${this.il.md.version} · ${this.il.md.typeCount.toLocaleString()} types`);
+    L.msg(`Unity ${this.game.unity} · IL2CPP metadata v${this.il.md.versionLabel} · ${this.il.md.typeCount.toLocaleString()} types`);
     L.big('------------------------------');
     L.msg(`${loaded.length} Banan${loaded.length === 1 ? '' : 's'} loaded`);
     for (const e of loaded) {
@@ -264,6 +316,22 @@ export class BananaLoader {
     };
   }
 
+  /**
+   * Bare type names for Banans (`Camera.main`, `UnityEngine.Time.timeScale`). Resolved when the
+   * code runs, so it's fine to compile before Il2Cpp is up; browser globals keep their meaning.
+   */
+  typeScope() {
+    if (this._typeScope) return this._typeScope;
+    let inner = null;
+    const live = () => (inner ||= this.interop ? this.interop.typeScope({ unityFirst: false }) : null);
+    this._typeScope = new Proxy(Object.create(null), {
+      has: (_, k) => { const s = live(); return !!s && k in s; },
+      get: (_, k) => { const s = live(); return s ? s[k] : undefined; },
+      set: () => false,
+    });
+    return this._typeScope;
+  }
+
   /** Compile, instantiate and bring a Banan up to the current stage. */
   load(e, { quiet = false } = {}) {
     if (e.state === 'loaded') return true;
@@ -274,7 +342,7 @@ export class BananaLoader {
     const logger = this.hub.logger(e.info.name, e.info.color);
     let inst;
     try {
-      const ex = compile(e.rec.source, e.id, this.scope(e, logger));
+      const ex = compile(e.rec.source, e.id, this.scope(e, logger), this.typeScope());
       inst = instantiate(ex);
     } catch (err) {
       e.state = 'error';
@@ -598,6 +666,8 @@ export class BananaLoader {
       get Il2Cpp() { return self.Il2Cpp; },
       get il() { return self.il; },
       get unity() { return self.unity; },
+      /** The shared Unity Bootstrap (loading screen, build info, report()). */
+      get bootstrap() { return self.bootstrap; },
       Preferences: {
         createCategory: (id, name) => self.prefs.createCategory(id, name),
         getCategory: (id) => self.prefs.getCategory(id),
@@ -607,7 +677,7 @@ export class BananaLoader {
       logger: (name, color) => self.hub.logger(name, color),
       patch: (target, hooks) => self.patcher.patch(null, target, hooks),
       /** Odium Dumper output from the running game: { files: [{ name, data }], summary }. */
-      dump: (o = {}) => { if (!self.il) throw new Error('IL2CPP is not ready'); return liveDump(self.il, o); },
+      dump: (o = {}) => { if (!self.il) throw new Error('IL2CPP is not ready'); return liveDump(self.il, { wasmBytes: self.bootstrap && self.bootstrap.wasmBytes, ...o }); },
       /** TypeScript definitions for the game: generateTypes({ assemblies: ['Assembly-CSharp', ...], publicOnly }) */
       generateTypes: (o = {}) => {
         const il = self.il;
@@ -618,6 +688,17 @@ export class BananaLoader {
         gen.game = `${self.game.product} (Unity ${self.game.unity})`;
         return gen.generate({ images, publicOnly: o.publicOnly !== false });
       },
+      /**
+       * IntelliSense used by the console and editor: complete('Camera.main.tr') →
+       * { from, to, items: [{ label, kind, detail }], hint }. Static only; nothing is called.
+       */
+      complete: (text, caret = String(text).length, ctx = {}) => {
+        if (!self.completer) return null;
+        const roots = { BananaLoader: self._api, Il2Cpp: self.Il2Cpp, il: self.il, unity: self.unity, ...(ctx.roots || {}) };
+        return self.completer.complete(String(text), caret, { bare: true, unityFirst: true, ...ctx, roots }, true);
+      },
+      /** The loader window (UI views), once it's built. */
+      get app() { return self.app || null; },
       install: (source, o) => self.install(source, o),
       installFromUrl: (url) => self.installFromUrl(url),
       uninstall: async (name) => { const e = self._entry(name); if (!e) throw new Error('no Banan ' + name); await self.remove(e); },
