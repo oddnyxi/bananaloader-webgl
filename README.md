@@ -11,6 +11,7 @@
 ![Mods](https://img.shields.io/badge/mods-JavaScript-f5c518)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-2ea043)
 ![License](https://img.shields.io/badge/license-MIT%20%2B%20attribution-lightgrey)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/bananaloader)
 
 <img src="docs/images/banans.png" alt="BananaLoader with five Banans installed" width="780">
 
@@ -44,6 +45,7 @@
 - [Building](#building)
 - [Project structure](#project-structure)
 - [Changelog](#changelog)
+- [Community](#community)
 - [License](#license)
 
 ## What it is
@@ -58,7 +60,7 @@
 - **Dependencies:** a Banan can `@require` another one (with a version range) and use its API.
 - **TypeScript autocomplete:** export a `.d.ts` of the game's types, so `Il2Cpp.find('UnityEngine.Camera').` completes in VS Code.
 - **Preferences:** saved settings per Banan, with controls generated in the UI.
-- **Hot reload:** edit a Banan in the built-in editor and press <kbd>Ctrl</kbd>+<kbd>S</kbd>; it unloads (patches, tabs and timers included) and loads again without restarting the game.
+- **Hot reload:** edit a Banan in the built-in editor (syntax highlighting, IntelliSense) and press <kbd>Ctrl</kbd>+<kbd>S</kbd>; it unloads (patches, tabs and timers included) and loads again without restarting the game.
 - **Built-in Unity Explorer:** browse the scene, inspect objects and call methods, in the same window. Click an object in the game view to select it.
 - **Odium UI:** black and red, toggled with <kbd>F8</kbd>.
 - **Unity 2018.1 to 6000:** IL2CPP metadata v24.0 to v31, old Emscripten fastcomp builds (Unity 2018 – 2021.1) and LLVM builds (2021.2+), and both the `UnityLoader.js` and `createUnityInstance` loaders.
@@ -558,7 +560,7 @@ bananaloader/
 │   │   ├── coroutines.js    generator coroutines
 │   │   ├── overlay.js       onGUI canvas
 │   │   └── store.js         IndexedDB and linked folder
-│   ├── app/                 the window: Banans, Console, Preferences, Patches, Editor, Settings
+│   ├── app/                 the window: Banans, Console, Preferences, Patches, Editor (with highlight.js), Settings
 │   ├── il2cpp/              IL2CPP bridge, metadata v24.0 – v39, Il2Cpp proxies, IntelliSense engine (shared with Unity Explorer)
 │   ├── dumper/              Odium Dumper: dump.cs, named wasm, script.json
 │   ├── ui/                  explorer views, the in-game picker and the autocomplete popup (shared with Unity Explorer)
@@ -568,6 +570,11 @@ bananaloader/
 ```
 
 ## Changelog
+
+### 1.4.0
+
+- **Syntax highlighting in the Banan editor.** Keywords, strings, template literals (with nested `${…}`), regexes, numbers, comments, the `// ==Banan==` header and its `@tags`, lifecycle methods, method calls, properties, and game type names (`Camera`, `Vector3`, … coloured when the game has that type). The textarea stays the real editor, so selection, undo, IME and autocomplete work as before.
+- <kbd>Tab</kbd> in the editor now keeps the undo history.
 
 ### 1.3.1
 
@@ -589,6 +596,10 @@ bananaloader/
 - **Fix: direct-call rewriting on fastcomp builds,** whose function table segment sits at an imported `tableBase`.
 - **Fix: heap-scan fallback could crash the game.** When a build strips every `FindObjectsOfType` variant, GameObjects are found by scanning the heap. Stale memory that only looked like an object could be passed to the engine, which aborted. Each candidate's native object now has to point back at it.
 - **Fix: `System.Type` arguments on fastcomp builds.** `RuntimeTypeHandle` and other one-field structs are passed by pointer there. This affected `FindObjectsOfType`, `GetComponents` and `MakeGenericType`.
+
+## Community
+
+Questions, bug reports, Banan showcases and help with modding: join the BananaLoader Discord at **[discord.gg/bananaloader](https://discord.gg/bananaloader)**.
 
 ## License
 
