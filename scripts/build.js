@@ -23,7 +23,7 @@ rmSync(resolve(root, 'dist'), { recursive: true, force: true });
 mkdirSync(resolve(root, 'dist'), { recursive: true });
 const out = await Bun.build({ entrypoints: [resolve(root, 'src/main.js')], target: 'browser', format: 'iife', minify, plugins: [bundleText] });
 if (!out.success) { out.logs.forEach((l) => console.error(l)); process.exit(1); }
-const code = await out.outputs[0].text();
+let code = await out.outputs[0].text();
 
 if (cfg.icon && !/^(https?:|data:)/i.test(cfg.icon) && existsSync(resolve(root, cfg.icon))) {
   cfg.icon = `data:image/png;base64,${readFileSync(resolve(root, cfg.icon)).toString('base64')}`;
@@ -35,6 +35,12 @@ const lines = [];
 for (const [k, v] of entries) for (const x of [].concat(v)) lines.push(v === true ? `// @${k}` : `// @${k.padEnd(pad)} ${x}`);
 const header = ['// ==UserScript==', ...lines, '// ==/UserScript=='].join('\n') + '\n\n';
 
+
+// ASCII-only output: userscript managers inject the code as a <script> text node, and some of them
+// mangle non-ASCII (U+FFFF in a regex once broke the whole script). \uXXXX escapes mean the same
+// thing in strings, templates, regexes and comments.
+const ascii = (s) => s.replace(/[^\x00-\x7f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+code = ascii(code);
 writeFileSync(resolve(root, 'dist/bananaloader.user.js'), header + code);
 writeFileSync(resolve(root, 'dist/bananaloader.js'), code);
 console.log(`Built dist/bananaloader.user.js (${(code.length / 1024).toFixed(0)} KB${minify ? ', minified' : ''})`);

@@ -11,8 +11,8 @@ import { T, FIELD, METHOD, PRIM_NAME } from './types.js';
 
 // ------------------------------------------------------------------------------------ tokenizer
 
-const ID_START = /[A-Za-z_$À-￿]/;
-const ID_PART = /[\w$À-￿]/;
+const ID_START = /[\p{L}\p{Nl}$_]/u;
+const ID_PART = /[\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Pc}$]/u;
 
 /**
  * Tokens of `src` (the text before the caret). The last token may be an unterminated string

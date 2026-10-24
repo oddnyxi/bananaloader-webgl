@@ -569,6 +569,10 @@ bananaloader/
 
 ## Changelog
 
+### 1.3.1
+
+- **Fix: the userscript failed to load** with `Invalid regular expression: … Range out of order in character class`. The minified build contained a literal U+FFFF character, which some userscript managers mangle when they inject the script. The identifier pattern is now ASCII-only, and the build escapes every non-ASCII character, so the output is plain ASCII.
+
 ### 1.3.0
 
 - **IntelliSense** in the Banan editor and the console: type names, namespaces, static and instance members (inherited ones included), struct fields, enum values, type names inside `Il2Cpp.type('…')`, `$component('…')` and `.of('…')`, and signature help with every overload. Locals, `for…of` variables and `this.x = …` assignments are followed. Static only: nothing runs while you type. Also exposed as `BananaLoader.complete(text)`.

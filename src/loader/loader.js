@@ -17,7 +17,7 @@ import { Overlay } from './overlay.js';
 import { TypeGen } from './typegen.js';
 import { liveDump } from '../dumper/live.js';
 
-export const VERSION = '1.3.0';
+export const VERSION = '1.3.1';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const SETTINGS_KEY = 'bananaloader:settings';
 const STAGES = ['boot', 'pre', 'started', 'initialized', 'late'];
