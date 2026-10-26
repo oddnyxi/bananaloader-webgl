@@ -1,0 +1,21 @@
+/* ==BananaStyle==
+@name        Mint
+@version     1.0.0
+@author      Nyxi
+@description A CSS-only example: green accent, deep green surfaces, tabs along the top.
+@layout      tabs
+==/BananaStyle== */
+
+/* Most of a style is setting the tokens on .root. Anything left out keeps the Default value. */
+.root {
+  --accent: #34d399;
+  --bg: #0b1512; --panel: #0f1d19; --raised: #142621; --hover: #18302a;
+  --line: #1e3a32; --line2: #24453b; --sunken: #08100e;
+  --text: #e6f4ef; --mute: #8fb3a7; --dim: #5f8377;
+  --radius: 14px; --radius-sm: 8px;
+  --head-bg: #0f1d19; --side-bg: #0f1d19; --foot-bg: #0f1d19;
+  --win-stripe: linear-gradient(90deg, transparent, var(--red), transparent);
+}
+
+/* Plain CSS works for anything the tokens don't cover. */
+.tab.on { color: var(--red-hi); }

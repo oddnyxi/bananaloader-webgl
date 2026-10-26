@@ -1,0 +1,65 @@
+/* Layouts (core/ui/layout.js): .root.lay-window | .lay-tabs | .lay-panels */
+.win, .pwin, .pbar { opacity: var(--ui-opacity, 1); }
+.root.ui-hidden .pbar, .root.ui-hidden .pwin { display: none !important; }
+
+/* ---- tabs: the sidebar becomes a strip of dock tabs along the top */
+.root.lay-tabs .body { flex-direction: column; }
+.root.lay-tabs .side {
+  width: auto; flex-direction: row; align-items: stretch; gap: 0; padding: 0; height: var(--dock-h, 32px); overflow-x: auto; overflow-y: hidden;
+  border-right: 0; border-bottom: 1px solid var(--line); scrollbar-width: none;
+}
+.root.lay-tabs .side::-webkit-scrollbar { display: none; }
+.root.lay-tabs .sgroup { padding: 0; width: 1px; margin: 7px 4px; background: var(--line); font-size: 0; flex: none; }
+.root.lay-tabs .sgroup:first-child { display: none; }
+.root.lay-tabs .tab { border-radius: 0; padding: 0 14px; flex: none; border-right: 1px solid var(--line); }
+.root.lay-tabs .tab .ic { margin-right: 7px; }
+.root.lay-tabs .tab.on { background: var(--bg); }
+.root.lay-tabs .tab.on::before { left: 0; right: 0; top: 0; bottom: auto; width: auto; height: 2px; border-radius: 0; box-shadow: none; }
+
+/* ---- panels: no single window */
+.root.lay-panels .win { display: none !important; }
+.pbar {
+  position: fixed; top: 14px; left: 0; right: 0; margin: 0 auto; width: max-content; z-index: 100000; pointer-events: auto; user-select: none;
+  display: flex; align-items: center; gap: 4px; height: 50px; padding: 0 8px 0 10px; max-width: calc(100vw - 24px);
+  background: var(--win-bg, var(--bg)); border: 1px solid var(--win-border, var(--line)); border-radius: var(--radius-bar, 16px);
+  box-shadow: var(--shadow, 0 18px 50px rgba(0,0,0,.6)); backdrop-filter: var(--backdrop, none); -webkit-backdrop-filter: var(--backdrop, none);
+  animation: pop .18s ease-out;
+}
+.pbar .pb-logo { flex: none; }
+.pb-title { font-weight: 600; font-size: 13.5px; padding: 0 6px 0 4px; white-space: nowrap; }
+.pb-sep { width: 1px; height: 24px; background: var(--line); margin: 0 4px; flex: none; }
+.pb-tabs { display: flex; align-items: center; gap: 2px; overflow-x: auto; scrollbar-width: none; min-width: 0; }
+.pb-tabs::-webkit-scrollbar { display: none; }
+.pb-gap { width: 8px; flex: none; }
+.pbtn {
+  flex: none; width: 36px; height: 36px; border: 0; border-radius: var(--radius-sm, 10px); background: transparent; color: var(--mute);
+  display: grid; place-items: center; cursor: pointer; transition: background .15s, color .15s; font: inherit; font-size: 11px; font-weight: 700;
+}
+.pbtn .ic { width: 18px; height: 18px; margin: 0; opacity: 1; }
+.pbtn:hover { background: var(--hover); color: var(--text); }
+.pbtn.on { color: var(--text-hi, #fff); background: var(--hover); }
+.pbtn.on.front { color: var(--red-hi); background: rgba(var(--rgb), .16); }
+.pb-hint { font-size: 11.5px; color: var(--mute); padding: 0 4px; white-space: nowrap; }
+.pb-hint b { color: var(--red-hi); font-weight: 600; }
+
+.pwin {
+  position: fixed; display: flex; flex-direction: column; overflow: hidden; pointer-events: auto; user-select: none; z-index: 3;
+  background: var(--win-bg, var(--bg)); border: 1px solid var(--win-border, var(--line)); border-radius: var(--radius, 12px);
+  box-shadow: var(--shadow, 0 24px 70px rgba(0,0,0,.75)); backdrop-filter: var(--backdrop, none); -webkit-backdrop-filter: var(--backdrop, none);
+  animation: pop .16s ease-out;
+}
+.phead {
+  display: flex; align-items: center; gap: 9px; height: 40px; padding: 0 8px 0 14px; flex: none; cursor: grab;
+  border-bottom: 1px solid var(--line); background: var(--phead-bg, transparent); font-weight: 600; font-size: 13px;
+}
+.phead:active { cursor: grabbing; }
+.phead .ic { width: 16px; height: 16px; color: var(--red-hi); flex: none; }
+.ptitle { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pbody { flex: 1; min-height: 0; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; }
+.pbody > .page.on { display: flex; flex: 1; min-height: 0; }
+.pbody:has(> .page.ue-fill.on), .pbody:has(> .ue-pane), .pbody:has(> .ins) { overflow: hidden; padding: 0; }
+.pbody > .ue-pane, .pbody > .ins { flex: 1; min-height: 0; }
+.ue-split.ue-solo { grid-template-columns: minmax(0, 1fr); }
+.ue-split.ue-solo > .ue-gut { display: none; }
+.pbody::-webkit-scrollbar { width: 8px; }
+.pbody::-webkit-scrollbar-thumb { background: var(--line2, #2a2a32); border-radius: 8px; }

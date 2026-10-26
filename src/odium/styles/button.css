@@ -1,7 +1,7 @@
 .btn {
-  width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; cursor: pointer;
+  width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm, 9px); cursor: pointer;
   display: flex; align-items: center; justify-content: center; gap: 8px;
-  background: linear-gradient(180deg, #1b1b21, #141418); color: var(--text); font: inherit; font-weight: 600; transition: .15s;
+  background: var(--btn-bg, linear-gradient(180deg, #1b1b21, #141418)); color: var(--text); font: inherit; font-weight: 600; transition: .15s;
 }
 .btn:hover {
   border-color: var(--red); background: linear-gradient(180deg, rgba(var(--rgb), .22), rgba(var(--rgb), .08));
@@ -17,7 +17,7 @@
 }
 
 .mini {
-  min-width: 26px; height: 26px; padding: 0 9px; border: 1px solid var(--line); border-radius: 6px; background: #0c0c0f;
+  min-width: 26px; height: 26px; padding: 0 9px; border: 1px solid var(--line); border-radius: var(--radius-sm, 6px); background: var(--sunken, #0c0c0f);
   color: var(--mute); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; transition: .12s;
 }
-.mini:hover { color: #fff; border-color: var(--red); }
+.mini:hover { color: var(--text-hi, #fff); border-color: var(--red); }

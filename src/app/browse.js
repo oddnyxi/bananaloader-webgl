@@ -87,7 +87,11 @@ export class BrowseView {
       this.renderList();
     } catch (e) {
       this.results = [];
-      this.list.replaceChildren(h('div.ue-note.warn', { text: e.message }));
+      this.list.replaceChildren(e.needsLogin
+        ? h('div.ue-note.warn.bs-connect', h('div', { text: e.message }), h('div.bs-act',
+          h('a.ue-btn.pri', { href: 'https://bananaloader.com/connect', target: '_blank', rel: 'noopener' }, icon(B.link, 'i'), 'Open bananaloader.com/connect'),
+          h('button.ue-btn', { on: { click: () => this.app.focusTab('settings') } }, 'Paste the key in Settings')))
+        : h('div.ue-note.warn', { text: e.message }));
       this.status.textContent = '';
     }
   }

@@ -322,6 +322,22 @@ declare const BananaLoader: {
   dump(o?: { named?: boolean; metadata?: boolean }): Promise<{ files: { name: string; data: Uint8Array | string }[]; summary: Record<string, number>; wasm: boolean }>;
   /** Delete an installed Banan (not folder Banans). */
   uninstall(name: string): Promise<void>;
+  /** BananaStyles: themes and layouts for the loader window. */
+  styles: {
+    list(): { id: string; name: string; version: string; author: string; layout: 'window' | 'tabs' | 'panels'; builtin: boolean; runsCode: boolean; active: boolean }[];
+    /** Id of the style in use. */
+    active(): string;
+    /** Apply a style by id or name (live). Returns the id actually applied (Default if it failed). */
+    apply(idOrName: string): string;
+    /** Install (or update) from source: a .style.js or a .css file with a ==BananaStyle== header. Returns its id. */
+    install(source: string, o?: { origin?: string; url?: string }): Promise<string>;
+    installUrl(url: string): Promise<string>;
+    remove(id: string): Promise<void>;
+    registry: {
+      search(q?: string, o?: Record<string, string>): Promise<any[]>;
+      install(slug: string, version?: string): Promise<string>;
+    };
+  };
   on(event: 'banans' | 'stage' | 'scenes' | 'patches' | 'frame' | 'unload', fn: (...a: any[]) => void): void;
 };
 

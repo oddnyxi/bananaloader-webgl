@@ -2,7 +2,7 @@
 // linked folder on disk (File System Access API, Chromium) that works like MelonLoader's Mods folder.
 
 const DB = 'bananaloader';
-const VERSION = 1;
+const VERSION = 2; // 2: + styles
 
 function open() {
   return new Promise((resolve, reject) => {
@@ -11,6 +11,7 @@ function open() {
       const db = r.result;
       if (!db.objectStoreNames.contains('banans')) db.createObjectStore('banans', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
+      if (!db.objectStoreNames.contains('styles')) db.createObjectStore('styles', { keyPath: 'id' });
     };
     r.onsuccess = () => resolve(r.result);
     r.onerror = () => reject(r.error);
@@ -42,6 +43,25 @@ export class Store {
   async remove(id) {
     await this.ready();
     return req(this.db.transaction('banans', 'readwrite').objectStore('banans').delete(id));
+  }
+
+  // ---- BananaStyles
+
+  async allStyles() {
+    await this.ready();
+    return req(this.db.transaction('styles').objectStore('styles').getAll());
+  }
+
+  async putStyle(rec) {
+    await this.ready();
+    rec.updatedAt = Date.now();
+    await req(this.db.transaction('styles', 'readwrite').objectStore('styles').put(rec));
+    return rec;
+  }
+
+  async removeStyle(id) {
+    await this.ready();
+    return req(this.db.transaction('styles', 'readwrite').objectStore('styles').delete(id));
   }
 
   async getMeta(key) {
@@ -86,7 +106,8 @@ export class Store {
     if (!dir) return [];
     const out = [];
     for await (const [name, h] of dir.entries()) {
-      if (h.kind !== 'file' || !/\.js$/i.test(name)) continue;
+      // *.style.js files are BananaStyles, not Banans
+      if (h.kind !== 'file' || !/\.js$/i.test(name) || /\.style\.js$/i.test(name)) continue;
       const f = await h.getFile();
       out.push({ file: name, source: await f.text() });
     }

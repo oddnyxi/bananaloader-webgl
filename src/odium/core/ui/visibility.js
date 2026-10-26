@@ -1,11 +1,17 @@
 import { unlisten } from '../../utils/listen.js';
-export function show() { this.win && this.win.classList.remove('hidden'); }
+export function show() {
+  if (!this.win) return;
+  this.win.classList.remove('hidden');
+  this.root.classList.remove('ui-hidden');
+}
 
 export function hide() {
   this.closeMenu();
   // a keybind waiting for a key would otherwise swallow the key meant to reopen the window
   this.cancelCapture();
-  this.win && this.win.classList.add('hidden');
+  if (!this.win) return;
+  this.win.classList.add('hidden');
+  this.root.classList.add('ui-hidden'); // the panels layout's bar and panels too
 }
 
 export function toggle() {

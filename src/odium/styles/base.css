@@ -6,7 +6,9 @@
   --red-dim: rgba(var(--rgb), .14);
   --bg: #09090b; --panel: #101013; --raised: #17171c; --hover: #1e1e24; --line: #26262d;
   --text: #ececf1; --mute: #8a8a96;
-  font: 13px/1.4 "Inter", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+  /* Styles override these (and the colours above); see the README's Styles section. Unset = the default look. */
+  --accent: var(--red); --accent-rgb: var(--rgb);
+  font: var(--font-size, 13px)/1.4 var(--font, "Inter", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif);
   color: var(--text);
   -webkit-font-smoothing: antialiased;
 }

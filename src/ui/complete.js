@@ -122,7 +122,7 @@ export function attachComplete(ta, { completer, context, enabled = () => true })
 
   function place(node, xy, small, preferAbove = false) {
     // keep inside the tool window (its root clips) and the viewport
-    const win = ta.closest('.win');
+    const win = ta.closest('.win, .pwin');
     const wr = win ? win.getBoundingClientRect() : { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
     const L = Math.max(0, wr.left), Tp = Math.max(0, wr.top);
     const R = Math.min(window.innerWidth, wr.right), B = Math.min(window.innerHeight, wr.bottom);

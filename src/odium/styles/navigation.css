@@ -1,18 +1,18 @@
 .side {
   width: 168px; padding: 10px; display: flex; flex-direction: column; gap: 4px;
-  background: var(--panel); border-right: 1px solid var(--line); overflow-y: auto; flex: none;
+  background: var(--side-bg, var(--panel)); border-right: 1px solid var(--line); overflow-y: auto; flex: none;
 }
-.sgroup { padding: 10px 12px 4px; font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: #5d5d68; font-weight: 700; }
+.sgroup { padding: 10px 12px 4px; font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim, #5d5d68); font-weight: 700; }
 .tab { white-space: nowrap;
-  position: relative; display: flex; align-items: center; text-align: left; padding: 9px 12px; border: 0; border-radius: 8px;
+  position: relative; display: flex; align-items: center; text-align: left; padding: 9px 12px; border: 0; border-radius: var(--radius-sm, 8px);
   background: transparent; color: var(--mute); font: inherit; font-weight: 500; cursor: pointer; transition: .15s;
 }
 .tab .ic { margin-right: 9px; opacity: .8; }
 .tab.on .ic, .tab:hover .ic { opacity: 1; }
 .tab:hover { background: var(--hover); color: var(--text); }
-.tab.on { background: var(--red-dim); color: #fff; }
+.tab.on { background: var(--red-dim); color: var(--text-hi, #fff); }
 .tab.on::before {
-  content: ""; position: absolute; left: 0; top: 20%; bottom: 20%; width: 3px; border-radius: 3px;
+  content: ""; position: absolute; left: 0; top: 20%; bottom: 20%; width: 3px; border-radius: var(--radius-xs, 3px);
   background: var(--red); box-shadow: 0 0 10px var(--red);
 }
 
@@ -24,5 +24,5 @@
 .content::-webkit-scrollbar, .side::-webkit-scrollbar, .rt-area::-webkit-scrollbar, .log-area::-webkit-scrollbar,
 .tbl-wrap::-webkit-scrollbar, .code::-webkit-scrollbar, .dd-list::-webkit-scrollbar { width: 8px; height: 8px; }
 .content::-webkit-scrollbar-thumb, .side::-webkit-scrollbar-thumb, .rt-area::-webkit-scrollbar-thumb, .log-area::-webkit-scrollbar-thumb,
-.tbl-wrap::-webkit-scrollbar-thumb, .code::-webkit-scrollbar-thumb, .dd-list::-webkit-scrollbar-thumb { background: #2a2a32; border-radius: 8px; }
+.tbl-wrap::-webkit-scrollbar-thumb, .code::-webkit-scrollbar-thumb, .dd-list::-webkit-scrollbar-thumb { background: var(--line2, #2a2a32); border-radius: var(--radius-sm, 8px); }
 .content::-webkit-scrollbar-thumb:hover { background: var(--red); }

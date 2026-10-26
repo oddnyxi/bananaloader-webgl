@@ -11,6 +11,7 @@ import { ConsoleView } from './console.js';
 import { BrowseView } from './browse.js';
 import { PrefsView } from './prefsview.js';
 import { PatchesView } from './patches.js';
+import { StylesView } from './styles.js';
 import { EditorView } from './editor.js';
 import { VERSION } from '../loader/loader.js';
 import explorerCss from 'bundle-text:../ui/explorer.css';
@@ -28,6 +29,8 @@ export class App {
     this.settings = S; // the explorer views read autoProps / showAccessors from here
     this.ui = new UI();
     this.ui.createWindow('BANANALOADER', { subtitle: 'v' + VERSION, width: 1080, height: 690, toggleKey: S.toggleKey || 'F8', icon: LOGO });
+    // a layout change leaves the window state as it was (hidden while the loading screen is up, etc.)
+    this.ui.barTitle = 'BananaLoader'; // the panels layout's top bar
     if (loader.bootstrap) loader.bootstrap.deferWindow(this.ui); // appears when the loading screen folds away
     this.ui.host.id = EXPLORER_HOST_ID;
     const style = document.createElement('style');
@@ -41,6 +44,7 @@ export class App {
     const fill = (name, group, ic) => { const t = this.ui.addTab(name, { group, icon: ic }); t.page.classList.add('ue-fill'); return t; };
     this.tabs.banans = fill('Banans', 'Loader', B.banana);
     this.tabs.browse = fill('Browse', 'Loader', B.download);
+    this.tabs.styles = fill('Styles', 'Loader', B.palette);
     this.tabs.console = fill('Console', 'Loader', B.terminal);
     this.tabs.prefs = this.ui.addTab('Preferences', { group: 'Loader', icon: B.sliders });
     this.tabs.patches = fill('Patches', 'Loader', B.hook);
@@ -53,6 +57,7 @@ export class App {
       this.tabs.classes.page.append(wait('Waiting for IL2CPP…'));
     }
     this.settingsTab = this.ui.addSettingsTab('Settings', { group: 'System' });
+    this.tabs.settings = this.settingsTab;
     this._settings();
 
     this.editor = new EditorView(this);
@@ -62,12 +67,23 @@ export class App {
     this.browse = new BrowseView(this);
     this.tabs.browse.page.append(this.browse.el);
     this.tabs.browse.btn.addEventListener('click', () => this.browse.activate());
+    this.stylesView = new StylesView(this);
+    this.tabs.styles.page.append(this.stylesView.el);
+    this.tabs.styles.btn.addEventListener('click', () => this.stylesView.activate());
+    // the panels layout: where a tab's panel first opens
+    const H = () => innerHeight;
+    if (this.tabs.scene) this.tabs.scene.panelDefault = () => ({ x: 24, y: 86, w: 300, h: H() - 110 });
+    if (this.tabs.classes) this.tabs.classes.panelDefault = () => ({ x: 340, y: 86, w: 760, h: H() - 160 });
     this.console = new ConsoleView(this);
     this.tabs.console.page.append(this.console.el);
     this.prefsView = new PrefsView(this, this.tabs.prefs);
     this.patches = new PatchesView(this);
     this.tabs.patches.page.append(this.patches.el);
     this.ui.selectTab(this.tabs.banans);
+    // the saved style (built-ins now; an installed one once IndexedDB has been read)
+    loader.styles.app = this;
+    if (loader.styles.entries.has(S.style)) loader.styles.apply(S.style);
+    else loader.styles.apply('default', { save: false }); // an installed style: applied once it's been read
 
     loader.on('unload', (inst) => this.removeBananUI(inst));
     loader.on('stage', () => {
@@ -96,6 +112,12 @@ export class App {
     this.scene = new SceneView(this);
     this.classes = new ClassesView(this, this.scene);
     this.tabs.scene.page.replaceChildren(this.scene.el);
+    // separate panels: the Scene's inspector gets a panel of its own beside the hierarchy
+    this.ui.addCompanion(this.tabs.scene, 'Inspector', this.scene.el.lastElementChild, {
+      icon: B.sliders,
+      defaultPlace: () => ({ x: innerWidth - 404, y: 86, w: 380, h: innerHeight - 110 }),
+      onMove: (out) => this.scene.el.classList.toggle('ue-solo', out),
+    });
     this.tabs.classes.page.replaceChildren(this.classes.el);
     this.classes.load();
     this.scene.refresh();
@@ -112,6 +134,7 @@ export class App {
 
   focusTab(id) {
     if (id === 'browse' && this.browse) this.browse.activate();
+    if (id === 'styles' && this.stylesView) this.stylesView.activate();
     const t = this.tabs[id];
     if (t && this.ui.active !== t) this.ui.selectTab(t);
   }
@@ -192,17 +215,26 @@ export class App {
   }
 
   _dropTarget() {
+    // the whole UI (the window, or every panel in the panels layout) takes dropped files
+    const root = this.ui.root;
     const win = this.ui.win;
-    win.addEventListener('dragover', (e) => { if (e.dataTransfer && [...e.dataTransfer.items].some((i) => i.kind === 'file')) { e.preventDefault(); win.classList.add('bl-drop'); } });
-    win.addEventListener('dragleave', (e) => { if (e.target === win || !win.contains(e.relatedTarget)) win.classList.remove('bl-drop'); });
-    win.addEventListener('drop', (e) => {
-      win.classList.remove('bl-drop');
+    const mark = (on) => { win.classList.toggle('bl-drop', on); root.classList.toggle('bl-dropping', on); };
+    root.addEventListener('dragover', (e) => { if (e.dataTransfer && [...e.dataTransfer.items].some((i) => i.kind === 'file')) { e.preventDefault(); mark(true); } });
+    root.addEventListener('dragleave', (e) => { if (!e.relatedTarget || !root.contains(e.relatedTarget)) mark(false); });
+    root.addEventListener('drop', async (e) => {
+      mark(false);
       const files = [...(e.dataTransfer && e.dataTransfer.files || [])];
       // only file drops are ours; dropped text goes into the console or editor as usual
       if (!files.length) return;
       e.preventDefault();
-      this.focusTab('banans');
-      this.banans.installFiles(files);
+      // BananaStyles (.css, *.style.js, or a ==BananaStyle== header) go to Styles, the rest are Banans
+      const styles = [], banans = [];
+      for (const f of files) {
+        const isStyle = /\.(css|style\.js)$/i.test(f.name) || /==BananaStyle==/.test((await f.slice(0, 4096).text()) || '');
+        (isStyle ? styles : banans).push(f);
+      }
+      if (styles.length) { this.focusTab('styles'); await this.stylesView.installFiles(styles); }
+      if (banans.length) { this.focusTab('banans'); this.banans.installFiles(banans); }
     });
   }
 
@@ -281,6 +313,9 @@ export class App {
     t.createSection('bananaloader.com');
     t.createToggle('Check for Banan updates when a game starts', (v) => { S.checkUpdates = v; save(); }, S.checkUpdates !== false, { save: false })
       .setTooltip('Asks bananaloader.com once per page load whether Banans you installed from Browse have new versions. Sends only their names and versions.');
+    t.createTextInput('Loader key', (v) => { S.registryKey = String(v || '').trim(); save(); if (S.registryKey) this.notify('Loader key saved', 'success'); }, { value: S.registryKey || '', placeholder: L.registryKey ? 'Using the key from your download' : 'blr_…', save: false })
+      .setTooltip('bananaloader.com needs a login to browse. Paste the key from bananaloader.com/connect (a read-only key: it can browse and download, nothing else). A copy of BananaLoader downloaded while logged in already has one.');
+    t.createButton('Get a loader key (bananaloader.com/connect)', () => window.open('https://bananaloader.com/connect', '_blank', 'noopener'), { icon: B.link });
     t.createTextInput('Registry address', (v) => { S.registry = String(v || '').trim() || 'https://api.bananaloader.com'; save(); }, { value: S.registry || 'https://api.bananaloader.com', placeholder: 'https://api.bananaloader.com', save: false })
       .setTooltip('Where the Browse tab looks for Banans. Leave as https://api.bananaloader.com unless you run your own server.');
     t.createSection('Loading screen');

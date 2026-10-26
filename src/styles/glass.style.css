@@ -1,0 +1,53 @@
+/* ==BananaStyle==
+@name        Glass
+@version     1.0.0
+@author      Nyxi
+@description See-through windows over the game: a floating top bar, and every tab in its own panel you can move, resize and keep open side by side.
+@layout      panels
+==/BananaStyle== */
+
+.root {
+  --accent: #ffd23f;
+  --bg: transparent; --panel: rgba(255,255,255,.035); --raised: rgba(255,255,255,.07); --hover: rgba(255,255,255,.08);
+  --line: rgba(255,255,255,.10); --line2: rgba(255,255,255,.16); --line-soft: rgba(255,255,255,.06); --line-hi: rgba(255,255,255,.24);
+  --sunken: rgba(0,0,0,.28); --text: #f5f5f5; --text-hi: #ffffff; --text2: rgba(255,255,255,.80); --mute: rgba(255,255,255,.62); --dim: rgba(255,255,255,.46);
+  --win-bg: rgba(16,16,18,.62); --win-border: rgba(255,255,255,.14); --backdrop: blur(30px) saturate(150%);
+  --shadow: 0 24px 70px rgba(0,0,0,.42);
+  --radius: 20px; --radius-sm: 10px; --radius-xs: 6px; --radius-bar: 16px;
+  --head-bg: transparent; --side-bg: transparent; --foot-bg: transparent; --win-stripe: none; --phead-bg: transparent;
+  --popup-solid: rgba(26,26,30,.97); --popup-bg: rgba(26,26,30,.97); --btn-bg: rgba(255,255,255,.10);
+  --row-hover: rgba(255,255,255,.05); --ins-head-bg: transparent;
+  --font: "Geist", "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "Geist Mono", "JetBrains Mono", ui-monospace, Consolas, monospace;
+}
+
+/* the bar */
+.pbar { gap: 2px; }
+.pbar .pb-logo { width: 28px; height: 28px; border-radius: 8px; box-shadow: none; }
+.pb-title { font-size: 14px; letter-spacing: -.01em; }
+.pbtn { border-radius: 10px; color: rgba(255,255,255,.72); }
+.pbtn.on { background: rgba(255,255,255,.10); color: #fff; }
+.pbtn.on.front { background: rgba(var(--rgb), .18); color: var(--red); }
+
+/* panels */
+.phead { border-bottom-color: rgba(255,255,255,.08); height: 44px; padding-left: 16px; font-size: 13.5px; letter-spacing: -.01em; }
+.phead .ic { color: var(--red); }
+.pwin .wbtn { border-radius: 8px; }
+.pwin .wbtn.x:hover { background: rgba(255,255,255,.12); color: #fff; }
+
+/* the single-window layouts, if someone switches this style's layout */
+.head { border-bottom-color: rgba(255,255,255,.08); }
+.title { letter-spacing: .02em; text-transform: none; font-size: 14px; font-weight: 600; }
+.tab.on { background: rgba(255,255,255,.12); }
+.tab.on::before { box-shadow: none; }
+
+/* controls */
+.ue-in, .in, select.in, textarea.in { background: rgba(0,0,0,.28); border-color: rgba(255,255,255,.10); }
+.ue-btn, .ue-ib { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.12); }
+.ue-btn.pri { color: #1a1505; }
+.bl-card { background: rgba(255,255,255,.045); border-color: rgba(255,255,255,.07); border-radius: 14px; }
+.bl-card:hover { border-color: rgba(255,255,255,.18); }
+.ue-row.sel { box-shadow: none; background: rgba(var(--rgb), .16); color: #ffe68a; }
+.ue-gut { background: transparent; }
+.ue-bar { border-bottom-color: rgba(255,255,255,.07); }
+.ue-bar.ue-sub { background: transparent; }

@@ -11,6 +11,7 @@ export function addTab(name, o = {}) {
 }
 
 export function selectTab(tab) {
+  if (this.layout === 'panels' && this._panels) return this.openPanel(tab);
   this.tabs.forEach((t) => {
     t.btn.classList.toggle('on', t === tab);
     t.page.classList.toggle('on', t === tab);
@@ -29,4 +30,5 @@ export function _mount(tab) {
   this._lastGroup = tab.group;
   this.side.appendChild(tab.btn);
   this.content.appendChild(tab.page);
+  if (this.layout === 'panels') this._barButton(tab);
 }

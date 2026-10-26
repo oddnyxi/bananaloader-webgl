@@ -41,6 +41,10 @@ const header = ['// ==UserScript==', ...lines, '// ==/UserScript=='].join('\n') 
 // thing in strings, templates, regexes and comments.
 const ascii = (s) => s.replace(/[^\x00-\x7f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 code = ascii(code);
+// bananaloader.com serves logged-in users a copy with their read-only loader key on this exact line
+// (it replaces it textually), so keep it on a line of its own, outside the minified bundle. The wrapper
+// keeps it out of the page's global scope when a manager injects the script as a <script> tag.
+code = `(() => {\nconst BAKED_REGISTRY_KEY = '';\n${code}\n})();\n`;
 writeFileSync(resolve(root, 'dist/bananaloader.user.js'), header + code);
 writeFileSync(resolve(root, 'dist/bananaloader.js'), code);
 console.log(`Built dist/bananaloader.user.js (${(code.length / 1024).toFixed(0)} KB${minify ? ', minified' : ''})`);

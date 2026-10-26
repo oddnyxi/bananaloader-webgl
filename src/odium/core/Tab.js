@@ -21,6 +21,8 @@ export class Tab extends Container {
 
   setVisible(v) {
     this.btn.style.display = v ? '' : 'none';
+    if (this._pbtn) this._pbtn.style.display = v ? '' : 'none';
+    if (!v && this.ui._panels && this.ui._panels.get(this)) this.ui.closePanel(this);
     // hiding the open tab moves to the first visible one, so its page doesn't linger
     if (!v && this.ui.active === this) {
       const next = this.ui.tabs.find((t) => t !== this && t.btn.style.display !== 'none');
@@ -59,6 +61,7 @@ export class Tab extends Container {
   /** Remove the tab, its page, and every control on it (config keys, hotkeys, keybinds). */
   destroy() {
     const ui = this.ui;
+    if (ui._dropPanel) ui._dropPanel(this);
     releaseInside(ui, this.page);
     this._release();
     // a group heading left with no tabs under it goes too

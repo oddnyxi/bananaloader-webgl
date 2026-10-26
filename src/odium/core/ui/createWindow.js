@@ -80,5 +80,7 @@ export function createWindow(title = 'ODIUM', o = {}) {
   (document.body || document.documentElement).appendChild(this.host);
   this.tabs.forEach((t) => this._mount(t));
   if (this.tabs[0]) this.selectTab(this.tabs[0]);
+  this.root.classList.add('lay-window');
+  if (o.layout && o.layout !== 'window') { const l = o.layout; this.layout = 'window'; this.setLayout(l); } else this.layout = 'window';
   return this;
 }

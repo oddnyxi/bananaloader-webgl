@@ -32,7 +32,7 @@ export function setOpacity(v) {
   v = Number(v);
   if (!Number.isFinite(v)) return this;
   this._opacity = Math.min(1, Math.max(0.3, v));
-  if (this.win) this.win.style.opacity = this._opacity;
+  if (this.root) this.root.style.setProperty('--ui-opacity', this._opacity);
   if (this._opCtl) this._opCtl.setValue(Math.round(this._opacity * 100), true);
   return this;
 }

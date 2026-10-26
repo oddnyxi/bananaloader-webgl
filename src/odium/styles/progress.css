@@ -1,6 +1,6 @@
-.bar { height: 7px; margin-top: 8px; border-radius: 7px; background: #26262d; overflow: hidden; }
+.bar { height: 7px; margin-top: 8px; border-radius: var(--radius-sm, 7px); background: var(--line2, #26262d); overflow: hidden; }
 .bar > i {
-  display: block; height: 100%; width: 0; border-radius: 7px; transition: width .25s ease;
+  display: block; height: 100%; width: 0; border-radius: var(--radius-sm, 7px); transition: width .25s ease;
   background: linear-gradient(90deg, var(--red-lo), var(--red), var(--red-hi)); box-shadow: 0 0 10px var(--red);
 }
 

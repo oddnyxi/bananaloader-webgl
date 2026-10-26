@@ -16,8 +16,14 @@ import { Coroutines } from './coroutines.js';
 import { Overlay } from './overlay.js';
 import { TypeGen } from './typegen.js';
 import { liveDump } from '../dumper/live.js';
+import { StyleManager } from './styles.js';
 
-export const VERSION = '1.6.0';
+// bananaloader.com puts a personal read-only key here when you download BananaLoader while logged in
+// (scripts/build.js writes the `const BAKED_REGISTRY_KEY = '';` line around the bundle)
+/* global BAKED_REGISTRY_KEY */
+const bakedKey = () => (typeof BAKED_REGISTRY_KEY === 'string' ? BAKED_REGISTRY_KEY : '');
+
+export const VERSION = '1.7.0';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const SETTINGS_KEY = 'bananaloader:settings';
 const STAGES = ['boot', 'pre', 'started', 'initialized', 'late'];
@@ -39,12 +45,13 @@ export class BananaLoader {
     this.scenes = new Map();
     this._events = {};
     this._colors = 0;
-    this.settings = { safeMode: false, explorer: true, toggleKey: 'F8', autoProps: 'engine', showAccessors: false, registry: 'https://api.bananaloader.com', checkUpdates: true, directCallsAll: false };
+    this.settings = { safeMode: false, explorer: true, toggleKey: 'F8', autoProps: 'engine', showAccessors: false, registry: 'https://api.bananaloader.com', checkUpdates: true, directCallsAll: false, style: 'default', registryKey: '' };
     try { const st = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}'); if (st && typeof st === 'object' && !Array.isArray(st)) Object.assign(this.settings, st); } catch (_) { /* ignore */ }
     // Safe mode is read once per page: turning it on or off in Settings takes effect after a reload.
     this.safeMode = this.settings.safeMode === true;
     this._loadStack = [];
     this._order = null;
+    this.styles = new StyleManager(this);
     this.prefs.on('saved', () => this._each('onPreferencesSaved'));
     this.prefs.on('loaded', () => this._each('onPreferencesLoaded'));
   }
@@ -83,6 +90,7 @@ export class BananaLoader {
       return r;
     });
     for (const r of records) this._addEntry(r);
+    this.styles.load(); // after detection, like the Banans: IndexedDB is only opened on Unity pages
     await boot.whenModule();
     this._syncHookSettings();
     // wrapped: on Unity 2018 – 2020 the Module is a thenable, so it can't be a promise's value
@@ -536,17 +544,29 @@ export class BananaLoader {
   /** API base (https://api.bananaloader.com by default; Settings can point it elsewhere). */
   get registryBase() { return String(this.settings.registry || 'https://api.bananaloader.com').replace(/\/+$/, ''); }
 
-  async registry(path, init) {
+  /** The bananaloader.com loader key: the one pasted in Settings, else the one baked into this copy. */
+  get registryKey() { return String(this.settings.registryKey || '').trim() || bakedKey(); }
+
+  async registry(path, init = {}) {
     let r;
-    try { r = await fetch(`${this.registryBase}/v1${path}`, { cache: 'no-store', credentials: 'omit', ...init }); } catch (e) {
+    const key = this.registryKey;
+    const headers = { ...(init.headers || {}), ...(key ? { authorization: `Bearer ${key}` } : {}) };
+    try { r = await fetch(`${this.registryBase}/v1${path}`, { cache: 'no-store', credentials: 'omit', ...init, headers }); } catch (e) {
       throw new Error(`can't reach ${this.registryBase} (offline, or this game's page blocks outside connections)`);
     }
-    if (!r.ok) { let m = `HTTP ${r.status}`; try { m = (await r.json()).error || m; } catch (_) { /* not json */ } throw new Error(m); }
+    if (!r.ok) {
+      let m = `HTTP ${r.status}`;
+      try { m = (await r.json()).error || m; } catch (_) { /* not json */ }
+      const err = new Error(r.status === 401 ? (key ? 'bananaloader.com didn\'t accept your loader key. Get a new one at bananaloader.com/connect and paste it in Settings.' : 'Connect BananaLoader to your bananaloader.com account: get a loader key at bananaloader.com/connect and paste it in Settings.') : m);
+      err.status = r.status;
+      if (r.status === 401) err.needsLogin = true;
+      throw err;
+    }
     return r;
   }
 
-  /** Install (or update) a Banan from the registry by slug. Checks the server's SHA-256. */
-  async installFromRegistry(slugName, version = null) {
+  /** Download a registry file (Banan or style), checked against the server's SHA-256: { body, headers: { version } } */
+  async registryDownload(slugName, version = null) {
     const path = version ? `/banans/${encodeURIComponent(slugName)}/versions/${encodeURIComponent(version)}/download` : `/banans/${encodeURIComponent(slugName)}/download`;
     const r = await this.registry(path);
     const text = await r.text();
@@ -555,7 +575,13 @@ export class BananaLoader {
       const got = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))].map((b) => b.toString(16).padStart(2, '0')).join('');
       if (got !== want) throw new Error('download corrupted (checksum mismatch)');
     }
-    const v = r.headers.get('x-banan-version') || parseHeader(text).version || '';
+    return { body: text, headers: { version: r.headers.get('x-banan-version') || '' } };
+  }
+
+  /** Install (or update) a Banan from the registry by slug. Checks the server's SHA-256. */
+  async installFromRegistry(slugName, version = null) {
+    const { body: text, headers } = await this.registryDownload(slugName, version);
+    const v = headers.version || parseHeader(text).version || '';
     const e = await this.install(text, { origin: 'registry', url: `${this.registryBase}/v1/banans/${slugName}/versions/${v}/download`, file: `${slugName}.js`, registry: { slug: slugName, version: v } });
     this.log.msg(`Installed ${e.info.name} ${v} from bananaloader.com`);
     return e;
@@ -928,6 +954,19 @@ export class BananaLoader {
         updates: () => self.registryUpdates(),
       },
       uninstall: async (name) => { const e = self._entry(name); if (!e) throw new Error('no Banan ' + name); await self.remove(e); },
+      /** BananaStyles: themes and layouts for this window. */
+      styles: {
+        list: () => self.styles.list().map((e) => ({ id: e.id, name: e.info.name, version: e.info.version, author: e.info.author, layout: e.info.layout, builtin: e.builtin, runsCode: e.runsCode, active: self.styles.activeId === e.id })),
+        active: () => self.styles.activeId,
+        apply: (id) => { const e = self.styles.get(id); if (!e) throw new Error('no style ' + id); return self.styles.apply(e.id).id; },
+        install: async (source, o) => (await self.styles.install(source, o)).id,
+        installUrl: async (url) => (await self.styles.installUrl(url)).id,
+        remove: (id) => { const e = self.styles.get(id); if (!e) throw new Error('no style ' + id); return self.styles.remove(e.id); },
+        registry: {
+          search: async (q = '', o = {}) => (await self.styles.search(q, o)).banans,
+          install: async (slug, version) => (await self.styles.installFromRegistry(slug, version)).id,
+        },
+      },
       on: (ev, fn) => self.on(ev, fn),
     };
     return this._api;

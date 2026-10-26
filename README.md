@@ -38,6 +38,7 @@
 - [UI, keys and onGUI](#ui-keys-and-ongui)
 - [Installing Banans](#installing-banans)
 - [The window](#the-window)
+- [Styles](#styles)
 - [Example Banans](#example-banans)
 - [How it works](#how-it-works)
 - [Compatibility](#compatibility)
@@ -484,6 +485,81 @@ The **Scene** and **Classes** tabs are Unity Explorer, built in: a hierarchy, an
 
 **Picking objects.** Press the target button in the Scene tab, hover the game and click. It checks, in order, UI elements under the cursor (topmost canvas first), a camera raycast against 3D colliders, then 2D colliders. The hovered object is outlined with its name and type. <kbd>Esc</kbd> or right-click cancels.
 
+## Styles
+
+The **Styles** tab changes how the window looks and how it's laid out. It comes with three styles:
+
+| Style | Layout | |
+| --- | --- | --- |
+| **Default** | one window, tabs down the side | the classic dark window |
+| **Glass** | separate panels | see-through windows over the game: a floating top bar, and each tab in its own panel you can move, resize and keep open side by side. The Scene tab opens as two panels, Hierarchy and Inspector. |
+| **Inspector** | tabs on top | looks like the Unity editor: grey docked panes, dense rows |
+
+Click **Apply** and the window changes straight away; nothing reloads, and your Banans, their tabs and hotkeys keep running. The style you pick is remembered. <kbd>F8</kbd> (or your toggle key) hides and shows everything, in every layout. In the Glass layout, click a button on the top bar to open that tab's panel, click it again to close it; panels remember where you put them.
+
+**Installing styles.** **Install from file** (or drop a `.style.js` / `.css` file anywhere on the window), **Install from URL**, or search **Get styles** for styles shared on [bananaloader.com/styles](https://bananaloader.com/styles). Styles that run JavaScript are marked **Runs code** and ask before they're installed from a file or URL; **CSS only** styles can't do anything but change the look. **Check for updates** updates styles you installed from bananaloader.com. Built-in styles can be exported but not removed.
+
+### Making a style
+
+A style is one file. The simplest is plain CSS with a header in a comment ([`examples/mint.style.css`](examples/mint.style.css)):
+
+```css
+/* ==BananaStyle==
+@name        Mint
+@version     1.0.0
+@author      You
+@description Green accent, tabs along the top.
+@layout      tabs
+==/BananaStyle== */
+
+.root { --accent: #34d399; --bg: #0b1512; --panel: #0f1d19; --line: #1e3a32; }
+```
+
+The CSS goes inside the window's shadow root, so it only affects BananaLoader, never the game page. Header tags: `@name` and `@version` (semver) are required; `@author`, `@description`, `@layout` (`window`, `tabs` or `panels`; default `window`) and `@preview` (an `https://` screenshot shown on cards) are optional.
+
+**Tokens.** Most of a style is setting these on `.root`; anything you leave out keeps the Default look.
+
+| Token | What |
+| --- | --- |
+| `--accent` | the accent colour (buttons, selection, highlights). Applied as the window's accent while the style is on. |
+| `--bg`, `--panel`, `--raised`, `--hover`, `--sunken` | surfaces: page, side panes and cards, raised controls, hover, inputs |
+| `--line`, `--line2`, `--line-soft`, `--line-hi` | borders and dividers |
+| `--text`, `--text-hi`, `--text2`, `--mute`, `--dim` | text, strongest to faintest |
+| `--win-bg`, `--win-border`, `--backdrop`, `--shadow` | the window (and Glass panels): background (can be translucent), border, `backdrop-filter` value (e.g. `blur(30px) saturate(150%)`), shadow |
+| `--head-bg`, `--side-bg`, `--foot-bg`, `--win-stripe`, `--phead-bg` | title bar, sidebar, status bar, the accent line on top, panel title bars |
+| `--popup-solid`, `--popup-bg`, `--btn-bg`, `--row-hover`, `--ins-head-bg` | menus/toasts/dialogs, tooltips and autocomplete, buttons, list hover, the inspector header |
+| `--radius`, `--radius-sm`, `--radius-xs`, `--radius-bar` | corner radii: windows, controls, small chips, the Glass top bar |
+| `--font`, `--font-mono`, `--font-size` | fonts (system fonts or ones already on the page) and the base size |
+| `--dock-h` | height of the tab strip in the `tabs` layout |
+
+Anything the tokens don't cover is plain CSS: the window is `.win` (`.head`, `.side`, `.tab`, `.content`, `.foot`), the panels layout adds `.pbar` (the top bar, `.pbtn` buttons) and `.pwin` panels (`.phead`, `.pbody`). The root gets `lay-window`, `lay-tabs` or `lay-panels`, so a style can target one layout.
+
+**Styles with JavaScript.** A `.style.js` file has a `// ==BananaStyle==` header like a Banan and exports the CSS and, optionally, an `apply` function:
+
+```js
+// ==BananaStyle==
+// @name        Night Shift
+// @version     1.0.0
+// @layout      panels
+// ==/BananaStyle==
+
+module.exports = {
+  css: `.root { --accent: #f472b6; --win-bg: rgba(20, 12, 24, .7); --backdrop: blur(24px); }`,
+  apply(ctx) {
+    // ctx: { ui, app, root, shadow, loader (window.BananaLoader), layout, logger,
+    //        addCss(text), onKey(spec, fn), setInterval(fn, ms), onCleanup(fn) }
+    ctx.onKey('Ctrl+Shift+N', () => ctx.logger.msg('night shift!'));
+    return () => { /* runs when another style is applied */ };
+  },
+};
+```
+
+Everything `apply` adds through `ctx` is removed when the style changes. It runs in the page with the same access as a Banan, so only install code styles you trust. In **safe mode** a style's CSS still applies but its `apply` doesn't run. If a style throws, BananaLoader logs the error in the Console and goes back to Default.
+
+From code: `BananaLoader.styles.list()`, `.active()`, `.apply(idOrName)`, `.install(source)`, `.installUrl(url)`, `.remove(id)`, `.registry.search(q)` and `.registry.install(slug)`.
+
+**Sharing.** Publish a style on bananaloader.com exactly like a Banan (Publish, drop the file): it's reviewed by moderators, then listed on [bananaloader.com/styles](https://bananaloader.com/styles) and in every loader's **Get styles**. Add a screenshot as the thumbnail so it looks good in the list.
+
 ## Example Banans
 
 | File | Shows |
@@ -495,6 +571,7 @@ The **Scene** and **Classes** tabs are Unity Explorer, built in: a hierarchy, an
 | [`log-mirror.js`](examples/log-mirror.js) | a plugin using `onPreInitialize` to catch the engine's first log lines |
 | [`scene-tools-lib.js`](examples/scene-tools-lib.js) | a library Banan exposing an `api` |
 | [`scene-report.js`](examples/scene-report.js) | `@require` / `@optional` and using another Banan's API |
+| [`mint.style.css`](examples/mint.style.css) | a CSS-only BananaStyle (see [Styles](#styles)) |
 
 ## How it works
 
@@ -569,8 +646,10 @@ bananaloader/
 │   │   ├── logger.js        loggers and the console feed
 │   │   ├── coroutines.js    generator coroutines
 │   │   ├── overlay.js       onGUI canvas
+│   │   ├── styles.js        BananaStyles: install, apply, layouts
 │   │   └── store.js         IndexedDB and linked folder
-│   ├── app/                 the window: Banans, Console, Preferences, Patches, Editor (with highlight.js), Settings
+│   ├── app/                 the window: Banans, Browse, Styles, Console, Preferences, Patches, Editor (with highlight.js), Settings
+│   ├── styles/              the built-in BananaStyles (Default, Glass, Inspector)
 │   ├── il2cpp/              IL2CPP bridge, metadata v24.0 – v39, Il2Cpp proxies, IntelliSense engine (shared with Unity Explorer)
 │   ├── dumper/              Odium Dumper: dump.cs, named wasm, script.json
 │   ├── ui/                  explorer views, the in-game picker and the autocomplete popup (shared with Unity Explorer)
@@ -580,6 +659,14 @@ bananaloader/
 ```
 
 ## Changelog
+
+### 1.7.0
+
+- **Styles tab: BananaStyles.** Change how the window looks and how it's laid out, live, without a reload. Built in: **Default**, **Glass** (see-through panels over the game with a floating top bar; Scene opens as separate Hierarchy and Inspector panels) and **Inspector** (looks like the Unity editor, tabs along the top). Install styles from a file, a URL or bananaloader.com, or make your own: CSS with a header, plus optional JavaScript. See [Styles](#styles).
+- **Three layouts** for the window: one window with tabs down the side, one window with tabs along the top, or separate panels with a top bar. Banan tabs, hotkeys and saved control settings work the same in all of them.
+- **Theme tokens**: every colour, radius and font in the window comes from CSS variables on `.root`, so a few lines of CSS restyle everything.
+- **bananaloader.com login**: bananaloader.com now needs an account to browse. BananaLoader downloaded from the site while you're logged in has a read-only loader key built in; otherwise get one at [bananaloader.com/connect](https://bananaloader.com/connect) and paste it in **Settings → Loader key**. Browse and Styles say so when the key is missing.
+- Files dropped on the window go to the right place: BananaStyles to Styles, everything else to Banans. `*.style.js` files in a linked folder are no longer loaded as Banans.
 
 ### 1.6.0
 

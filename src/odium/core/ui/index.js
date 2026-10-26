@@ -10,3 +10,4 @@ export * from './contextMenu.js';
 export * from './modal.js';
 export * from './config.js';
 export * from './settingsTab.js';
+export * from './layout.js';

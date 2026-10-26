@@ -1,0 +1,61 @@
+/* ==BananaStyle==
+@name        Inspector
+@version     1.0.0
+@author      Nyxi
+@description Looks like the Unity editor: grey docked panes, dense rows, tabs along the top.
+@layout      tabs
+==/BananaStyle== */
+
+.root {
+  --accent: #f5c518;
+  --bg: #383838; --panel: #333333; --raised: #3e3e3e; --hover: #454545;
+  --line: #232323; --line2: #2a2a2a; --line-soft: #303030; --line-hi: #555555;
+  --sunken: #2a2a2a; --text: #d4d4d4; --text-hi: #f2f2f2; --text2: #c4c4c4; --mute: #a8a8a8; --dim: #8c8c8c;
+  --win-bg: #383838; --win-border: #141414; --shadow: 0 18px 50px rgba(0,0,0,.55);
+  --radius: 4px; --radius-sm: 3px; --radius-xs: 2px;
+  --head-bg: #262626; --side-bg: #2f2f2f; --foot-bg: #262626; --win-stripe: none;
+  --popup-solid: #3c3c3c; --popup-bg: #2b2b2b; --btn-bg: #4a4a4a; --row-hover: #3f3f3f; --ins-head-bg: #383838;
+  --font: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif; --font-size: 12px;
+  --font-mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+  --dock-h: 30px;
+}
+
+/* title bar */
+.head { padding: 6px 8px 6px 10px; gap: 8px; border-bottom-color: #141414; }
+.logo { width: 16px; height: 16px; }
+.logo.has-img { width: 16px; height: 16px; }
+.title { letter-spacing: 0; text-transform: none; font-size: 12px; font-weight: 600; color: #e6e6e6; }
+.sub { font-family: var(--font-mono); color: #8c8c8c; }
+.wbtn { width: 26px; height: 22px; border-radius: 3px; }
+.wbtn.x:hover { background: #c94a4a; }
+.foot { padding: 4px 26px 4px 10px; border-top-color: #141414; }
+.foot b { color: var(--red); }
+
+/* dock tabs */
+.side { border-bottom-color: #1c1c1c; }
+.tab { font-size: 12px; color: #a8a8a8; border-right-color: #232323; }
+.tab .ic { width: 14px; height: 14px; }
+.tab:hover { background: #353535; color: #e6e6e6; }
+.tab.on { background: #383838; color: #f2f2f2; }
+.tab.on::before { background: var(--red); }
+.sgroup { background: #232323; }
+
+/* panes, rows, inputs */
+.content { padding: 10px; }
+.ue-bar { min-height: 30px; padding: 4px 6px; background: #2c2c2c; border-bottom-color: #1f1f1f; }
+.ue-bar.ue-sub { background: #2c2c2c; }
+.ue-in { height: 20px; border-radius: 3px; background: #2a2a2a; border-color: #1c1c1c; font-size: 11.5px; }
+.ue-in:focus { box-shadow: none; border-color: var(--red); }
+.ue-ib { width: 22px; height: 22px; border-radius: 3px; background: #4a4a4a; border-color: #232323; }
+.ue-btn { height: 22px; border-radius: 3px; background: #4a4a4a; border-color: #232323; color: #d4d4d4; font-weight: 500; }
+.ue-btn:hover { background: #565656; border-color: #232323; }
+.ue-btn.pri { color: #1c1600; }
+.ue-row { height: 22px; }
+.ue-row.sel { background: #4d4424; box-shadow: none; color: #fff; }
+.ue-gut { background: #1c1c1c; opacity: 1; }
+.ue-left { background: #333333; }
+.ins-tab.on { border-color: var(--red); }
+.bl-card { border-radius: 3px; background: #3c3c3c; border-color: #2a2a2a; padding: 10px 12px; }
+.bl-card:hover { border-color: #555; }
+.bl-tile { border-radius: 4px; }
+.card { border-radius: 3px; }

@@ -41,8 +41,7 @@ export function setToggleKey(spec) {
   if (this._tk) this.unbindKey(this._tk);
   this.toggleKey = spec;
   this._tk = this.bindKey(spec, () => this.toggle());
-  const tk = this.win && this.win.querySelector('.tk');
-  if (tk) tk.textContent = spec;
+  if (this.root) this.root.querySelectorAll('.tk').forEach((tk) => { tk.textContent = spec; });
   if (this._tkCtl) this._tkCtl.setValue(spec, true);
   return this;
 }

@@ -7,6 +7,6 @@
 .dd.open .chev { transform: rotate(225deg); border-color: var(--red-hi); }
 .dd-list { display: none; margin-top: 8px; border-top: 1px solid var(--line); padding-top: 6px; max-height: 170px; overflow-y: auto; }
 .dd.open .dd-list { display: block; }
-.dd-item { padding: 7px 10px; border-radius: 6px; cursor: pointer; color: var(--mute); transition: .12s; }
+.dd-item { padding: 7px 10px; border-radius: var(--radius-sm, 6px); cursor: pointer; color: var(--mute); transition: .12s; }
 .dd-item:hover { background: var(--hover); color: var(--text); }
-.dd-item.on { color: #fff; background: var(--red-dim); }
+.dd-item.on { color: var(--text-hi, #fff); background: var(--red-dim); }
