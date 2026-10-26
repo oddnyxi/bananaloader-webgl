@@ -3,6 +3,8 @@ export function show() { this.win && this.win.classList.remove('hidden'); }
 
 export function hide() {
   this.closeMenu();
+  // a keybind waiting for a key would otherwise swallow the key meant to reopen the window
+  this.cancelCapture();
   this.win && this.win.classList.add('hidden');
 }
 
@@ -21,4 +23,8 @@ export function destroy() {
   this.reg.clear();
   this.keys = [];
   this._lastGroup = undefined;
+  this.active = null;
+  this._tk = null;
+  this._tkCtl = this._accentCtl = this._opCtl = this._themeCtl = null;
+  if (this._handles) this._handles.clear();
 }

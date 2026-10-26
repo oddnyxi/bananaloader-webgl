@@ -11,7 +11,7 @@ export const THEMES = {
   Mono: '#d4d4d8',
 };
 
-export const MODIFIER_KEYS = ['Control', 'Shift', 'Alt', 'Meta'];
+export const MODIFIER_KEYS = ['Control', 'Shift', 'Alt', 'Meta', 'AltGraph', 'CapsLock', 'NumLock', 'ScrollLock', 'OS', 'Fn', 'FnLock', 'Hyper', 'Super', 'Symbol', 'SymbolLock'];
 
 // Badge type aliases -> CSS colour class suffix (.b-red, .b-green, ...)
 export const BADGE_TYPES = {

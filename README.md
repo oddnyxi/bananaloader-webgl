@@ -350,10 +350,13 @@ this.patch(Il2Cpp.method('PlayerController::TakeDamage', ['System.Single']), { .
 | Coverage | Means |
 | --- | --- |
 | **all** | every caller is hooked |
-| **pending** | indirect calls are hooked now, direct calls after a page reload. The tab offers a **Reload now** button. |
-| **indirect** | direct-call patching is off (Settings), or the build couldn't be rewritten |
+| **most** | every caller except direct calls inside a few functions the rewriter couldn't decode |
+| **pending** | indirect calls are hooked now, direct calls after a page reload. The tab offers a **Reload now** button, or turn on **Catch direct calls without reloading** in Settings. |
+| **indirect** | only indirect calls: direct-call patching is off, safe mode is on, BananaLoader attached after the game loaded, or the rewrite failed (the tab says which) |
 
 The rewrite only touches call sites of patched methods, takes about a second even for a 100 MB build, and is cached per build. Turning **Direct-call patching** off in Settings, or turning on Safe mode, loads the original wasm untouched.
+
+With **Catch direct calls without reloading** on (Settings, off by default), every method's direct calls are rewritten as the game loads (about 0.2 s), so a new patch covers every call immediately, with no reload. The cost is slightly slower method calls and no compiled-code cache for the game's wasm. If the rewritten wasm ever fails to compile, the setting turns itself off and the original loads.
 
 ## Dependencies
 
@@ -375,9 +378,9 @@ module.exports = class extends Banan {
 A library Banan sets `this.api = { ... }` in `onInitializeBanan`. The rules:
 
 - **Load order.** Required and optional Banans load first. Cycles and missing or disabled requirements show up as a clear error on the Banan's card.
-- **Versions.** Ranges use `>=`, `>`, `<=`, `<`, `=`, `^` and `~`. Space-separated ranges must all match.
-- **Unloading.** Unloading, reloading or updating a library unloads its dependents first and loads them again afterwards.
-- **Late dependencies.** A Banan waiting on a missing library loads as soon as the library is installed or enabled.
+- **Versions.** Ranges follow npm semver: `>=`, `>`, `<=`, `<`, `=`, `^` and `~` (with the usual 0.x rules), space-separated comparators must all match (`>=1.0 <2.0`), and `||` gives alternatives.
+- **Unloading.** Unloading, reloading or updating a library unloads its dependents first and loads them again afterwards. When a library is disabled or deleted, Banans that `@require` it stop with a clear error, and Banans that only `@optional` it keep running without it.
+- **Late dependencies.** A Banan waiting on a missing library loads as soon as the library is installed, enabled or added to the linked folder, including Banans that need it through another Banan.
 
 The Banans tab shows each Banan's requirements as chips. See [`scene-tools-lib.js`](examples/scene-tools-lib.js) and [`scene-report.js`](examples/scene-report.js).
 
@@ -456,6 +459,12 @@ Tabs, hotkeys, timers (`this.setInterval`, `this.setTimeout`), patches and corou
 
 ## Installing Banans
 
+**From bananaloader.com.** Open the **Browse** tab, search, and press **Install**. Every Banan and every version on the site was checked by a moderator first. Installed Banans are checked for updates once per page load (Settings → bananaloader.com), and the Browse tab shows an **Update all** bar when there are some. Publishing your own: log in on [bananaloader.com](https://bananaloader.com/publish) with Discord and upload the `.js`, or use an API token from a script (see [the API docs](https://bananaloader.com/docs)).
+
+Some game sites send a Content-Security-Policy that blocks requests to other domains. Browse then says it can't reach the site; installing from a file still works.
+
+**Other ways:**
+
 - **Add file / drag and drop:** `.js` files, stored in the browser (IndexedDB).
 - **URL:** downloads a raw `.js` file. Banans installed this way get an **Update** button.
 - **New / Editor:** write one in the browser.
@@ -524,11 +533,12 @@ The 2018.3 build was also tested with the userscript injected after the game had
 
 ## Limitations
 
-- **Direct calls need one reload.** A new patch on a directly-called method catches every caller only after the page reloads (coverage **pending** until then). Methods IL2CPP inlined into their callers can't be patched at all, as with Harmony.
+- **Direct calls without a reload are opt-in.** By default, a new patch catches direct calls after one reload (coverage **pending**). Turn on **Catch direct calls without reloading** in Settings and every patch covers all calls immediately, at the cost of about 0.2 s of load time and slightly slower calls. Methods IL2CPP inlined into their callers can't be patched at all, as with Harmony.
+- **Merged methods.** The compiler merges methods with identical code into one function. A direct call to merged code can't say which of those methods it meant, so a hook on one of them runs only when `this` is the patched method's class (or a subclass). For static methods it runs for every merged twin.
 - **Generic instantiations the game never used.** IL2CPP only compiles the generic instantiations the game needs (plus shared reference-type code). `List<MyStruct>` works only if the game uses it.
 - **Stripped code.** Anything the game never used isn't in the build. Accessing a stripped member returns `undefined`, and calling one throws a clear error.
 - **Scene names.** If a build strips the scene-name APIs, scenes are reported as `Scene <handle>`.
-- **Injected after the game started.** If BananaLoader is injected into a game that's already running, it can't see the wasm compile, so it downloads the wasm again from the cache. On fastcomp builds (Unity 2018 – 2021.1), patching needs the exact signatures it gets from that file, and direct calls can't be rewritten until the page reloads.
+- **Injected after the game started.** If BananaLoader is injected into a game that's already running, it can't see the wasm compile, so it downloads the wasm again from the cache. On fastcomp builds (Unity 2018 – 2021.1), patching needs the exact signatures it gets from that file. Direct calls can't be rewritten in a game that's already running; patches catch them after a reload.
 - **Banans run in the page with the game's privileges.** Only install Banans you trust, just as you would with DLL mods.
 
 ## Building
@@ -570,6 +580,72 @@ bananaloader/
 ```
 
 ## Changelog
+
+### 1.6.0
+
+A big bug-fix release: about 240 fixes from a line-by-line audit of the whole loader, plus a few more found while testing.
+
+- **New: catch direct calls without reloading** (Settings, off by default). New patches cover every call immediately. See [Patching](#patching-harmony).
+- **Fix: patching ignored direct calls on compressed games.** Games whose wasm is served brotli/gzip-compressed at 4 MB or less never got their direct calls rewritten, so patches only caught indirect calls.
+- **Fix: `this.setTimeout` / `this.setInterval` never ran their callback.**
+- **Fix: two Banans that `@optional` each other crashed loading**, which stopped every Banan. Dependency cycles now show as errors on the cards.
+- **Interop fixes that could corrupt memory:**
+  - Assigning a `List`, `Dictionary`, delegate or other generic object to a field, array element or argument wrote the wrong pointer. A plain JS object assigned to such a slot now throws instead of corrupting memory.
+  - `t.position = Il2Cpp.new('UnityEngine.Vector3', 1, 2, 3)` copied the object header into the struct. It now copies the value, and partial setters like `t.position = { y: 7 }` keep the other axes.
+  - `ref`/`out` parameters of generic structs (`Nullable<long>`, `KeyValuePair<long,long>`) overflowed their buffer.
+- **Fix: struct methods on Unity 2018 – 2021.1 got the wrong `this`**, so struct constructors and instance methods (`new Vector3(1,2,3)`) read their fields 8 bytes off.
+- **Fix: Unity 2018.1/2018.2 builds misread parameter and field info**, so overloads never matched and most fields read as null.
+- **Interop:**
+  - `out`/`ref` parameters of class types (e.g. `TryGetValue`) return objects instead of numbers.
+  - Enum parameters take member names (`Input.GetKey('Space')`).
+  - Numbers, booleans and BigInts passed to `object` parameters are boxed, and type proxies work as `System.Type` arguments (`go.GetComponent(Camera)`).
+  - `obj.$method()` finds inherited methods, signature arrays accept `System.Single`-style names, and `.of()` works for generic methods of generic types.
+  - Structs read with property names can be passed back into methods; one-field `long`/`float`/`double` structs (`TimeSpan`, `DateTime`) work as arguments and results.
+  - `findAll` of a base class or interface works on builds that need a heap scan, and the scene hierarchy finds objects on builds that strip `GameObject.get_transform`.
+  - Queue and Stack enumerate in .NET order, dictionaries page past 300 entries, and properties without code read as `undefined`.
+  - `long`/`ulong` returns and fields agree on signedness; v29+ string constants decode correctly.
+- **Patching:**
+  - `ctx.callOriginal()` throws a readable error when the method throws, and letting it escape passes the game's own exception on; the original no longer runs twice.
+  - Auto-disabled patches can be unpatched. Patches sharing compiled code each decode their own arguments.
+  - `ctx.result`/`setArg` work for one-field `long`/`float`/`double` structs, ref returns, and JS strings, numbers and proxies on `object` parameters.
+  - Coverage is reported honestly, with a new **most** state. The Patches tab explains why a patch isn't catching direct calls.
+  - Return-value conversion errors are logged as hook errors instead of crashing the game.
+- **Loader:**
+  - Safe mode really loads nothing for the whole session (enable, Reload, Save, Update and folder sync used to bypass it), and disabled Banans stay off on reload.
+  - `@require` ranges follow npm semver, including `>=1.0 <2.0`, `||` and 0.x `^`/`~`.
+  - Libraries: disabling or deleting one no longer stops Banans that only `@optional` it, and turning it back on restores everything that depends on it, transitively. A linked-folder sync wakes waiting Banans and reloads dependents.
+  - Saving a folder Banan in the editor makes a separate browser copy instead of being overwritten by the next sync.
+  - Helpers called after a Banan unloaded throw "X is unloaded" instead of leaking patches, tabs or hotkeys.
+  - Preferences keep their type (a wrong-typed value is coerced, not lost on the next load), and corrupt storage no longer breaks Banans.
+  - Coroutines: a throwing thenable or a broken iterator no longer stops every Banan's frame callbacks; async generators work.
+  - The logger prints NaN, Map, Set, nested arrays, cycles and type proxies properly.
+  - IndexedDB is only opened on pages with a Unity game.
+- **Window and explorer:**
+  - Hot-reloading a Banan no longer leaves its old tab controls and hotkeys running, and its saved control config keeps applying.
+  - Copy buttons report whether the copy worked.
+  - Console: evaluating Emscripten's `Module` no longer freezes the page, and the source filter resets when its Banan is gone.
+  - Editor: Tab/Shift+Tab indent selections with undo, new-Banan names always make a valid class, and saving after a delete doesn't bring the Banan back.
+  - Import keeps disabled Banans disabled.
+  - Explorer: editing one transform axis no longer rewrites the others, Escape cancels the reference editor, keyboard navigation no longer crashes or toggles groups, `inspect()` scrolls to the object, constructors are listed as **New**, and value cells recover after an error.
+  - Odium: dropdowns with number values round-trip through config, hiding the window cancels a key capture, async button errors are shown, and AltGr counts as a modifier.
+- **Loading screen:** the Ready pill fades away instead of staying in the corner, and failures before attach (failed downloads, a rejected loader) show the error card instead of a stuck full-screen card.
+- **IntelliSense:** `long`/`ulong` are typed as BigInt, `for…of` over `List`/`Dictionary` knows the element type, and accepting a completion inside an outer call no longer eats its `)`.
+- **game.d.ts and dump.cs:** generic-arity siblings no longer collide (`Action`, `Action_1`, …), and compiler-generated names are no longer doubled.
+
+### 1.5.0
+
+- **Browse tab: Banans from [bananaloader.com](https://bananaloader.com).** Search, read descriptions, and install with one click; downloads are checked against the server's SHA-256. Banans installed this way remember their version: once per page load BananaLoader asks the site whether newer versions were approved, and the Browse tab offers **Update all**. Settings → bananaloader.com turns the check off or points at another registry.
+- `BananaLoader.registry.search(q)`, `.get(slug)`, `.install(slug)` and `.updates()` for Banans and tools.
+- Reinstalling or updating a Banan keeps it disabled if you had disabled it.
+
+### 1.4.1
+
+- **Fix: turning a GameObject off didn't work on many builds.** Unity strips `GameObject.SetActive` from builds whose game never calls it, and the toggle failed quietly there. Now:
+  - With `SetActive` (most real games), it's used as before. If the game turns the object straight back on, you're told instead of the switch silently flipping back.
+  - Without it, the Renderers, Colliders and Behaviours on the object and its children are disabled instead, and exactly those are re-enabled when you turn it back on. A notice says this happened.
+  - If the build has neither, the error says why.
+- **Fix: the active switch could show "off" for an active object** when the build strips `get_activeSelf`, so clicking it tried to turn the object *on*. The state now falls back to what was last set, then `activeInHierarchy`.
+- **Fix: objects you turned off disappeared from the scene tree** on builds that can only list active objects, so they couldn't be turned back on. They (and their children) now stay listed.
 
 ### 1.4.0
 

@@ -39,7 +39,7 @@ select.ue-in { padding-right: 4px; }
 .ue-ib:disabled { opacity: .35; pointer-events: none; }
 .ue-btn {
   height: 28px; padding: 0 11px; border-radius: 7px; border: 1px solid var(--line); background: var(--raised); color: var(--text);
-  font: 600 12px inherit; font-family: inherit; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; transition: .15s;
+  font-family: inherit; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; transition: .15s;
 }
 .ue-btn svg { width: 14px; height: 14px; }
 .ue-btn:hover { border-color: var(--red); color: #fff; }
@@ -64,6 +64,7 @@ select.ue-in { padding-right: 4px; }
 }
 .ue-row:hover { background: var(--hover); color: #fff; }
 .ue-row.sel { background: var(--red-dim); color: #fff; box-shadow: inset 2px 0 0 var(--red); }
+.ue-list:focus .ue-row.cur { outline: 1px dashed rgba(255,255,255,.28); outline-offset: -1px; }
 .ue-row.off { color: #6b6b76; }
 .ue-row.hid { font-style: italic; }
 .ue-row .car { width: 16px; height: 16px; flex: none; display: grid; place-items: center; color: #5d5d68; border-radius: 4px; }

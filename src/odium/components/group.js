@@ -32,5 +32,6 @@ export function createGroup(title, o = {}) {
   g.setIcon(o.icon);
 
   head.onclick = () => g.toggle();
+  g._hotkeyAction = () => g.toggle();
   return g;
 }

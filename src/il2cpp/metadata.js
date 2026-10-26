@@ -136,8 +136,8 @@ export class Metadata {
     let methodTotal = 0;
     for (let i = 0; i < this.typeCount; i++) { const t = this._tdRaw(i); if (t.methodStart >= 0) methodTotal = Math.max(methodTotal, t.methodStart + t.methodCount); }
     this.methodCount = this.counted ? this.sec.methods.count : methodTotal;
-    if (!this.counted) {
-      const mdSize = methodTotal ? Math.round(this.sec.methods.size / methodTotal) : 32;
+    if (!this.counted && methodTotal) { // no typedef references a method: nothing to check against
+      const mdSize = Math.round(this.sec.methods.size / methodTotal);
       if (mdSize !== this.L.method.size) throw new MetadataError(`metadata v${this.subVersion}: unexpected method definition size ${mdSize} (expected ${this.L.method.size})`);
     }
 
@@ -157,6 +157,8 @@ export class Metadata {
       w.P = rec(s.methods) - 20 - w.TD - w.T - w.GC;
       for (const [k, v] of Object.entries(w)) if (![1, 2, 4].includes(v)) throw new MetadataError(`metadata v${this.version}: can't work out the ${k} index width (${v})`);
     }
+    // v38+ may narrow the nested-types table like the interfaces table; its record size says so
+    w.N = this.counted && [1, 2, 4].includes(rec(s.nestedTypes)) ? rec(s.nestedTypes) : 4;
     this.w = w;
 
     // ---- type definitions
@@ -320,12 +322,12 @@ export class Metadata {
   }
 
   /** Namespace-qualified name, with nesting as Outer+Inner and generic arity stripped of `N. */
-  fullName(i, { arity = false } = {}) {
+  fullName(i, { arity = false, depth = 0 } = {}) {
     const t = this.typeDef(i);
     const n = arity ? t.name : t.name.replace(/`\d+$/, '');
     if (t.declaringTypeIndex >= 0 && this._declTd) {
       const d = this._declTd(t.declaringTypeIndex);
-      if (d >= 0) return this.fullName(d, { arity }) + '+' + n;
+      if (d >= 0 && d !== i && depth < 32) return this.fullName(d, { arity, depth: depth + 1 }) + '+' + n;
     }
     return t.namespace ? t.namespace + '.' + n : n;
   }
@@ -357,7 +359,7 @@ export class Metadata {
     return { index: i, name: this.str(m.u32At(p)), get: m.i32At(p + 4), set: m.i32At(p + 8), attrs: m.u32At(p + 12), token: m.u32At(p + this.L.prop.token) };
   }
 
-  nestedType(i) { return this.mem.i32At(this.sec.nestedTypes.off + i * 4); }
+  nestedType(i) { return this.w.N === 4 ? this.mem.i32At(this.sec.nestedTypes.off + i * 4) : this._idx(this.sec.nestedTypes.off + i * this.w.N, this.w.N); }
 
   /** Type index of the i-th entry of the interfaces table. */
   interfaceType(i) { return this._idx(this.sec.interfaces.off + i * this.w.T, this.w.T); }

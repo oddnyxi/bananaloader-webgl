@@ -62,7 +62,7 @@ export function _installKeys() {
     const s = keySpec(e);
     if (!s) return;
     // plain letters shouldn't fire hotkeys while the user is typing somewhere
-    const plain = !e.ctrlKey && !e.altKey && !e.metaKey && e.key.length === 1;
+    const plain = !e.ctrlKey && !e.altKey && !e.metaKey && e.key.length === 1; // keySpec() is null when there's no key
     const t = e.target;
     if (plain && (this._typing || (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))))) return;
     let hit = false;

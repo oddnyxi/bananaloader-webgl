@@ -13,6 +13,7 @@
 
 import { T, FIELD, METHOD } from './types.js';
 import { TypeIndex } from './typeindex.js';
+import { ALIAS, fieldKey } from './runtime.js';
 
 const PTR = Symbol('il2cpp.ptr');
 
@@ -21,6 +22,12 @@ export class Ref {
 }
 
 const REF = new Set([T.STRING, T.CLASS, T.OBJECT, T.SZARRAY, T.ARRAY]);
+const PRIM_TYPE = {
+  [T.VOID]: 'System.Void', [T.BOOLEAN]: 'System.Boolean', [T.CHAR]: 'System.Char', [T.I1]: 'System.SByte', [T.U1]: 'System.Byte',
+  [T.I2]: 'System.Int16', [T.U2]: 'System.UInt16', [T.I4]: 'System.Int32', [T.U4]: 'System.UInt32', [T.I8]: 'System.Int64',
+  [T.U8]: 'System.UInt64', [T.R4]: 'System.Single', [T.R8]: 'System.Double', [T.STRING]: 'System.String', [T.I]: 'System.IntPtr',
+  [T.U]: 'System.UIntPtr', [T.OBJECT]: 'System.Object', [T.TYPEDBYREF]: 'System.TypedReference',
+};
 
 export class Interop {
   constructor(il, unity, fmt) {
@@ -55,7 +62,11 @@ export class Interop {
       gameObjects: (name) => self.gameObjects(name),
       new: (name, ...args) => self.construct(name, args),
       ref: (v) => new Ref(v),
-      string: (x) => (typeof x === 'string' ? self.wrap(self.il.newString(x)) : self.il.readString(self.unwrap(x))),
+      string: (x) => {
+        if (typeof x === 'string') return self.wrap(self.il.newString(x));
+        const p = self.unwrap(x);
+        return typeof p === 'number' && self.il.isString(p) ? self.il.readString(p) : null;
+      },
       /** System.Type object for a name (for APIs that take a Type). */
       typeOf: (name) => self.wrap(self.il.typeObject(self.il.resolveTypeName(name))),
       isProxy: (x) => !!(x && x[PTR] !== undefined),
@@ -71,6 +82,51 @@ export class Interop {
     return v;
   }
 
+  /** A type proxy (Il2Cpp.type(...), a bare Camera)? */
+  _isTypeProxy(v) { return typeof v === 'function' && v[PTR] === 0 && v.$td !== undefined; }
+
+  /** The boxed object's value (a struct as { field }, an enum as its number) when v is a proxy of a boxed struct/enum. */
+  _boxedValue(v) {
+    if (!v || typeof v !== 'object' || v[PTR] === undefined || !v[PTR]) return undefined;
+    const il = this.il;
+    const ptr = v[PTR];
+    const k = il.klassOf(ptr);
+    const td = il.tdOfKlass(k);
+    if (!(td >= 0 && il.md.typeDef(td).isValueType)) return undefined;
+    return this.read(ptr + 8, k + il.layout.byval);
+  }
+
+  /** Box a JS number / boolean / BigInt as System.Int32, Double, Boolean or Int64 (for `object` slots). */
+  box(v) {
+    const il = this.il;
+    const name = typeof v === 'boolean' ? 'System.Boolean' : typeof v === 'bigint' ? 'System.Int64'
+      : Number.isInteger(v) && v >= -2147483648 && v <= 2147483647 ? 'System.Int32' : 'System.Double';
+    const ref = this.typeRef(name);
+    const obj = this._allocate(ref);
+    if (!obj) throw new TypeError(`Il2Cpp: can't box ${typeof v} values in this build`);
+    il.writeValue(obj + 8, ref.p, v);
+    return obj;
+  }
+
+  /** JS value for a reference-type slot or argument: proxies → pointers, type proxies → System.Type, numbers/bools → boxed, strings → System.String. */
+  _toRef(p, v, kind) {
+    const il = this.il;
+    if (v === null || v === undefined) return 0;
+    if (this._isTypeProxy(v)) {
+      if (kind !== T.OBJECT && kind !== T.CLASS) throw new TypeError(`Il2Cpp: a type can't go where ${il.typeName(p)} is expected`);
+      return il.typeObject(il.resolveTypeName(v.$name));
+    }
+    if (v && (typeof v === 'object' || typeof v === 'function') && v[PTR] !== undefined) return v[PTR];
+    if (typeof v === 'string') {
+      if (kind === T.STRING || kind === T.OBJECT) return il.newString(v);
+      if (il.typeName(p, true) === 'System.Type') return il.typeObject(il.resolveTypeName(v));
+      throw new TypeError(`Il2Cpp: a string can't go where ${il.typeName(p)} is expected`);
+    }
+    if ((typeof v === 'number' || typeof v === 'boolean' || typeof v === 'bigint') && kind === T.OBJECT) return this.box(v);
+    if (typeof v === 'number') return v >>> 0; // a raw object pointer
+    throw new TypeError(`Il2Cpp: ${Array.isArray(v) ? 'an array' : typeof v} can't go where ${il.typeName(p)} is expected (pass an Il2Cpp object or null)`);
+  }
+
   // ------------------------------------------------------------------ type references
 
   /** { td, p (Il2CppType*), k (class, may be 0), name, generic } */
@@ -82,7 +138,9 @@ export class Interop {
     const t = il.typeInfo(p);
     const generic = t.kind === T.GENERICINST;
     const k = generic ? il.klassOfType(p) : 0;
-    const td = generic ? il.tdOfKlass(k) : il.tdOfType(p);
+    let td = generic ? il.tdOfKlass(k) : il.tdOfType(p);
+    // System.Int32, System.String, System.Object…: their types have primitive kinds, so go by name
+    if (td < 0 && !generic && PRIM_TYPE[t.kind]) td = il.findType(PRIM_TYPE[t.kind]);
     if (td < 0 && !generic) throw new Error(`Il2Cpp: ${name} is not a class or struct type`);
     return { td, p, k: k || il.klassOfTd(td), name: il.typeName(p, true), generic };
   }
@@ -90,6 +148,11 @@ export class Interop {
   _klass(ref, init = false) {
     if (!ref.k || (init && !this.il.staticFieldsBase(ref.k) && this._hasStatics(ref))) {
       ref.k = ref.generic ? this.il.klassOfType(ref.p) : this.il.ensureClass(ref.td, init);
+      if (ref.generic && init && ref.k && !this.il.staticFieldsBase(ref.k)) {
+        // generic instances get their statics when their class constructor runs
+        const rc = this.il.findMethod('System.Runtime.CompilerServices.RuntimeHelpers', 'RunClassConstructor', 1);
+        if (rc) { try { this.il.call(rc, 0, ref.p); } catch (_) { /* leave them uninitialized */ } }
+      }
     }
     return ref.k;
   }
@@ -153,36 +216,49 @@ export class Interop {
   _staticFieldOn(k, name) {
     for (let c = k, g = 0; c && g < 64; c = this.il.parentKlass(c), g++) {
       const f = this.il.runtimeFields(c).find((x) => (x.name === name || x.name === `<${name}>k__BackingField`) && (x.isStatic || x.isConst));
-      if (f) return f;
+      if (f) {
+        // [ThreadStatic] fields have no slot in the static block (offset -1)
+        if (f.isStatic && !f.isConst && f.offset === -1) throw new Error(`Il2Cpp: ${name} is [ThreadStatic], which isn't supported`);
+        return f;
+      }
     }
     return null;
   }
 
+  /**
+   * A property accessor as a callable descriptor, or null when there's no such accessor.
+   * An accessor that exists but can't be called (stripped, unsupported struct ABI…) comes back
+   * as { uncallable: reason }.
+   */
   _accessor(k, td, name, isSetter) {
     const p = this.members(td).props.get(name);
     if (!p) return null;
     const meta = isSetter ? p.setter : p.getter;
     if (!meta) return null;
     const list = (k && this.methodsOn(k).get(meta.name)) || [];
-    const d = list.find((x) => x.parameterCount === meta.parameterCount && !this.il.whyNotCallable(x));
-    return d || this.il.desc(meta);
+    const d = list.find((x) => x.parameterCount === meta.parameterCount && !this.il.whyNotCallable(x)) || this.il.desc(meta);
+    const why = this.il.whyNotCallable(d);
+    if (why) return { uncallable: why, isStatic: d.isStatic, name: meta.name };
+    return d;
   }
 
   // ------------------------------------------------------------------ values
 
-  isRefType(p) {
+  /** Is a value of type p an object pointer? With `deref`, judge a byref type (ref/out) by its pointee. */
+  isRefType(p, deref = false) {
     const t = this.il.typeInfo(p);
-    if (t.byref) return false;
+    if (t.byref && !deref) return false;
     if (REF.has(t.kind)) return true;
     if (t.kind === T.GENERICINST) { const b = this.il.tdOfType(p); return !(b >= 0 && this.il.md.typeDef(b).isValueType); }
     return false;
   }
 
+  /** Read the value of type p stored at addr. A byref type (ref/out) reads its pointee stored at addr. */
   read(addr, p, depth = 0) {
     const il = this.il;
     const t = il.typeInfo(p);
     if (t.kind === T.STRING) return il.readString(il.mem.u32At(addr));
-    if (this.isRefType(p)) return this.wrap(il.mem.u32At(addr));
+    if (this.isRefType(p, true)) return this.wrap(il.mem.u32At(addr));
     if (t.kind === T.VALUETYPE || t.kind === T.GENERICINST) {
       if (t.kind === T.VALUETYPE && il.md.typeDef(il._tdFromData(t.data)).isEnum) return il.readValue(addr, p);
       const fs = il.fieldsOfStructType(p);
@@ -196,8 +272,12 @@ export class Interop {
 
   write(addr, p, v) {
     const il = this.il;
-    v = this.unwrap(v);
     const t = il.typeInfo(p);
+    if (this.isRefType(p, true)) { il.mem.setU32(addr, this._toRef(p, v, t.kind)); return; }
+    // a boxed struct/enum proxy (Il2Cpp.new('UnityEngine.Vector3', …)) into a struct slot: its value, not its header
+    const bv = this._boxedValue(v);
+    if (bv !== undefined) v = bv;
+    v = this.unwrap(v);
     if ((t.kind === T.VALUETYPE || t.kind === T.GENERICINST) && v && typeof v === 'object') {
       const fs = il.fieldsOfStructType(p);
       if (fs) {
@@ -208,8 +288,6 @@ export class Interop {
         return;
       }
     }
-    if ((v === null || v === undefined) && this.isRefType(p)) { il.mem.setU32(addr, 0); return; }
-    if (t.kind === T.OBJECT && typeof v === 'string') { il.mem.setU32(addr, il.newString(v)); return; }
     il.writeValue(addr, p, v);
   }
 
@@ -223,7 +301,10 @@ export class Interop {
       const ptr = r.value >>> 0;
       return il.typeInfo(p).kind === T.STRING ? il.readString(ptr) : this.wrap(ptr);
     }
-    return il.unmarshalReturn(r);
+    const out = il.unmarshalReturn(r);
+    // one-field structs: same property-style names as struct reads (<X>k__BackingField → X)
+    if (r.ret.single && out && typeof out === 'object') { const o = {}; for (const [n, x] of Object.entries(out)) o[fieldKey(n)] = x; return o; }
+    return out;
   }
 
   /** Call a method record or descriptor with JS arguments. */
@@ -238,13 +319,15 @@ export class Interop {
         let v = args[i];
         const byref = il.typeInfo(p.type).byref;
         if (v instanceof Ref) { if (byref) refs.push([i, v]); v = v.value; }
-        v = this.unwrap(v);
-        if (!byref && il.typeInfo(p.type).kind === T.OBJECT && typeof v === 'string') return il.newString(v);
-        if (!byref && this.isRefType(p.type) && (v === null || v === undefined)) return 0;
-        if (!byref && this.isRefType(p.type) && typeof v === 'string' && il.typeInfo(p.type).kind !== T.STRING) {
-          // a type name where a System.Type is expected
-          if (il.typeName(p.type, true) === 'System.Type') return il.typeObject(il.resolveTypeName(v));
+        const pt = il.typeInfo(p.type);
+        if (this.isRefType(p.type, true)) {
+          if (pt.kind === T.STRING && typeof v === 'string') return il.marshal(p.type, v, temps);
+          v = this._toRef(p.type, v, pt.kind);
+          return byref ? il.marshal(p.type, v, temps) : v;
         }
+        const bv = this._boxedValue(v);
+        if (bv !== undefined) v = bv;
+        v = this.unwrap(v);
         return il.marshal(p.type, v, temps);
       });
       const r = il.invokeRaw(d, self, raw);
@@ -279,10 +362,28 @@ export class Interop {
     const k = t.kind;
     const isRef = this.isRefType(p);
     if (v === null || v === undefined) return isRef ? 1 : -Infinity;
-    if (v && (typeof v === 'object' || typeof v === 'function') && v[PTR] !== undefined) {
+    if (this._isTypeProxy(v)) {
       if (!isRef) return -Infinity;
+      return il.typeName(p, true) === 'System.Type' ? 4 : k === T.OBJECT ? 2 : -Infinity;
+    }
+    if (v && (typeof v === 'object' || typeof v === 'function') && v[PTR] !== undefined) {
+      const ptr = v[PTR];
+      if (!isRef) {
+        // a boxed struct/enum proxy for a struct/enum parameter of the same type
+        const bt = ptr ? il.tdOfKlass(il.klassOf(ptr)) : -1;
+        return bt >= 0 && bt === il.tdOfType(p) && il.md.typeDef(bt).isValueType ? 4 : -Infinity;
+      }
+      if (k === T.GENERICINST && ptr) {
+        // List<string> isn't a List<int>: compare the instantiated classes when the runtime has made them
+        const pk = il.cachedClass(p);
+        const base = il.tdOfType(p);
+        if (pk) {
+          if (isSubKlass(il, il.klassOf(ptr), pk)) return 4;
+          if (!(base >= 0 && il.md.typeDef(base).isInterface)) return -Infinity;
+        }
+      }
       const ptd = il.tdOfType(p);
-      if (ptd >= 0 && v[PTR] && il.isInstanceOf(v[PTR], ptd)) return 4;
+      if (ptd >= 0 && ptr && il.isInstanceOf(ptr, ptd)) return k === T.GENERICINST ? 3 : 4;
       return k === T.OBJECT ? 2 : 1;
     }
     let isEnum = false;
@@ -291,9 +392,10 @@ export class Interop {
       case 'string':
         if (k === T.STRING) return 4;
         if (isRef && il.typeName(p, true) === 'System.Type') return 2;
-        return k === T.OBJECT ? 1 : (k === T.CHAR && v.length === 1) ? 2 : isEnum ? 1 : -Infinity;
-      case 'boolean': return k === T.BOOLEAN ? 4 : -Infinity;
-      case 'bigint': return k === T.I8 || k === T.U8 ? 4 : -Infinity;
+        if (isEnum) { try { il.enumValue(il._tdFromData(t.data), v); return 3; } catch (_) { return -Infinity; } }
+        return k === T.OBJECT ? 1 : (k === T.CHAR && v.length === 1) ? 2 : -Infinity;
+      case 'boolean': return k === T.BOOLEAN ? 4 : k === T.OBJECT ? 0.5 : -Infinity; // object: boxed
+      case 'bigint': return k === T.I8 || k === T.U8 ? 4 : k === T.OBJECT ? 0.5 : -Infinity;
       case 'number':
         if (k === T.R4 || k === T.R8) return 3;
         if (isEnum) return 2;
@@ -304,7 +406,7 @@ export class Interop {
       case 'object':
         if ((k === T.VALUETYPE && !isEnum) || (k === T.GENERICINST && !isRef)) {
           const fs = il.fieldsOfStructType(p) || [];
-          return 2 + fs.filter((f) => f.name in v).length / Math.max(1, fs.length);
+          return 2 + fs.filter((f) => f.name in v || fieldKey(f.name) in v).length / Math.max(1, fs.length);
         }
         return -Infinity;
       default: return -Infinity;
@@ -312,7 +414,7 @@ export class Interop {
   }
 
   /** A callable function for method `name`, with .of(...types) for generic methods. */
-  _methodFn(list, metaDefs, self, isStatic, label) {
+  _methodFn(list, metaDefs, self, isStatic, label, klass = 0) {
     const fn = (...a) => {
       const m = this.overload(list, a, isStatic) || (isStatic ? null : this.overload(list, a, true));
       if (!m) {
@@ -327,8 +429,9 @@ export class Interop {
       const defs = metaDefs.filter((x) => x.genericContainerIndex !== -1 && x.parameterCount === a.length);
       if (!defs.length) throw new TypeError(`Il2Cpp: ${label} has no generic overload with ${a.length} parameter(s)`);
       const descs = [];
-      for (const d of defs) { try { descs.push(il.inflateMethod(d, argTypes)); } catch (e) { if (defs.length === 1) throw e; } }
-      const m = this.overload(descs, a, isStatic) || this.overload(descs, a, !isStatic);
+      for (const d of defs) { try { descs.push(il.inflateMethod(d, argTypes, klass)); } catch (e) { if (defs.length === 1) throw e; } }
+      // an instance can call static generic methods too; a type can't call instance ones (no `this`)
+      const m = this.overload(descs, a, isStatic) || (isStatic ? null : this.overload(descs, a, true));
       if (!m) throw new TypeError(`Il2Cpp: no ${label}<${types.join(', ')}> overload takes these arguments`);
       return this.invoke(m, m.isStatic ? 0 : self, a);
     };
@@ -340,9 +443,22 @@ export class Interop {
   typeProxy(name) {
     const key = typeof name === 'number' ? name : String(name);
     if (this._types.has(key)) return this._types.get(key);
+    return this._typeProxy(key, this.typeRef(name));
+  }
+
+  /** Type proxy straight from a runtime class (works for generic instances and their nested types). */
+  typeProxyOfKlass(k) {
+    const key = `klass:${k}`;
+    if (this._types.has(key)) return this._types.get(key);
+    const il = this.il;
+    const p = k + il.layout.byval;
+    const generic = il.typeInfo(p).kind === T.GENERICINST;
+    return this._typeProxy(key, { td: il.tdOfKlass(k), p, k, name: il.klassName(k), generic });
+  }
+
+  _typeProxy(key, ref) {
     const self = this;
     const il = this.il;
-    const ref = this.typeRef(name);
     const td = ref.td;
     const fullName = ref.name;
     const metaStatic = () => this.members(td);
@@ -378,10 +494,10 @@ export class Interop {
         if (fm && (fm.attrs & FIELD.STATIC)) { const s = staticAddr(fm.name); if (s && s.addr) return self.read(s.addr, s.type); }
         const k = self._klass(ref, true);
         const g = self._accessor(k, td, key, false);
-        if (g && g.isStatic) return self.invoke(g, 0, []);
+        if (g && g.isStatic) return g.uncallable ? undefined : self.invoke(g, 0, []); // no code in this build: undefined
         const list = k ? self.methodsOn(k).get(key) : (metaStatic().methods.get(key) || []).map((m) => il.desc(m));
         const metas = metaStatic().methods.get(key) || [];
-        if ((list && list.length) || metas.length) return self._methodFn(list || [], metas, 0, true, `${fullName}.${key}`);
+        if ((list && list.length) || metas.length) return self._methodFn(list || [], metas, 0, true, `${fullName}.${key}`, k);
         const d = il.md.typeDef(td);
         for (let i = 0; i < d.nestedCount; i++) {
           const n = il.md.nestedType(d.nestedTypesStart + i);
@@ -394,7 +510,10 @@ export class Interop {
         if (fm && (fm.attrs & FIELD.STATIC) && !(fm.attrs & FIELD.LITERAL)) { const s = staticAddr(fm.name); if (s && s.addr) { self.write(s.addr, s.type, v); return true; } }
         const k = self._klass(ref, true);
         const st = self._accessor(k, td, key, true);
-        if (st && st.isStatic) { self.invoke(st, 0, [v]); return true; }
+        if (st && st.isStatic) {
+          if (st.uncallable) throw new TypeError(`Il2Cpp: can't set ${fullName}.${String(key)}: ${st.uncallable}`);
+          self.invoke(st, 0, [v]); return true;
+        }
         throw new TypeError(`Il2Cpp: ${fullName}.${String(key)} is not a writable static member`);
       },
       construct(_, a) { return self.construct(ref, a); },
@@ -448,7 +567,7 @@ export class Interop {
           case '$alive': return !self.unity.isUnityObject(ptr) || self.unity.alive(ptr);
           case '$is': return (name) => { const r = self.typeRef(name); return r.k ? isSubKlass(il, k, r.k) : il.isInstanceOf(ptr, r.td); };
           case '$toArray': return () => { const el = self.fmt.elements(ptr, 1e6); return el ? el.items.map((e) => self.read(e.addr, e.type)) : null; };
-          case '$static': return self.typeProxy(il.klassName(k));
+          case '$static': return self.typeProxyOfKlass(k);
           case '$get': return (name) => self._getMember(ptr, thisPtr, k, td, name);
           case '$set': return (name, v) => self._setMember(ptr, thisPtr, k, td, name, v);
           case '$call': return (name, ...a) => {
@@ -486,10 +605,10 @@ export class Interop {
     const f = this.klassFields(k).get(key);
     if (f) return this.read(ptr + f.offset, f.type);
     const g = this._accessor(k, td, key, false);
-    if (g) return this.invoke(g, g.isStatic ? 0 : thisPtr, []);
+    if (g) return g.uncallable ? undefined : this.invoke(g, g.isStatic ? 0 : thisPtr, []); // no code in this build: undefined
     const list = this.methodsOn(k).get(key);
     const metas = this.members(td).methods.get(key) || [];
-    if ((list && list.length) || metas.length) return this._methodFn(list || [], metas, thisPtr, false, `${il.klassName(k, false)}.${key}`);
+    if ((list && list.length) || metas.length) return this._methodFn(list || [], metas, thisPtr, false, `${il.klassName(k, false)}.${key}`, k);
     const sf = this._staticFieldOn(k, key);
     if (sf && sf.isConst) return il.constValue(sf.metaIndex);
     if (sf) { const base = il.staticFieldsBase(sf.klass); if (base) return this.read(base + sf.offset, sf.type); }
@@ -501,17 +620,32 @@ export class Interop {
     const f = this.klassFields(k).get(key);
     if (f) { this.write(ptr + f.offset, f.type, v); return; }
     const s = this._accessor(k, td, key, true);
-    if (s) { this.invoke(s, s.isStatic ? 0 : thisPtr, [v]); return; }
+    if (s) {
+      if (s.uncallable) throw new TypeError(`Il2Cpp: can't set ${il.klassName(k)}.${String(key)}: ${s.uncallable}`);
+      // a partial struct ({ y: 5 }) keeps the other fields, like a struct field write does
+      const pt = s.params[0] && s.params[0].type;
+      if (pt && v && typeof v === 'object' && v[PTR] === undefined && !Array.isArray(v) && il.fieldsOfStructType(pt)) {
+        const g = this._accessor(k, td, key, false);
+        if (g && !g.uncallable) {
+          const cur = this.invoke(g, g.isStatic ? 0 : thisPtr, []);
+          if (cur && typeof cur === 'object') v = { ...cur, ...v };
+        }
+      }
+      this.invoke(s, s.isStatic ? 0 : thisPtr, [v]); return;
+    }
     const sf = this._staticFieldOn(k, key);
     if (sf && !sf.isConst) { const base = il.staticFieldsBase(sf.klass); if (base) { this.write(base + sf.offset, sf.type, v); return; } }
     throw new TypeError(`Il2Cpp: ${il.klassName(k)}.${String(key)} is not writable`);
   }
 
   _component(ptr, name) {
-    const ref = this.typeRef(name);
+    const ref = this._isTypeProxy(name) ? this.typeRef(name.$name) : this.typeRef(name);
     const go = this.il.tdOfKlass(this.il.klassOf(ptr)) === this.unity.td.GameObject ? ptr : this.unity.gameObjectOf(ptr);
     if (!go) return null;
-    for (const c of this.unity.components(go)) if (this.il.isInstanceOf(c, ref.td)) return this.wrap(c);
+    for (const c of this.unity.components(go)) {
+      // generic components: MyGeneric<int> isn't a MyGeneric<string>
+      if (ref.generic ? ref.k && isSubKlass(this.il, this.il.klassOf(c), ref.k) : this.il.isInstanceOf(c, ref.td)) return this.wrap(c);
+    }
     return null;
   }
 
@@ -581,7 +715,7 @@ export class Interop {
       if (sig === undefined) return true;
       if (typeof sig === 'number') return d.parameterCount === sig;
       if (d.parameterCount !== sig.length) return false;
-      return sig.every((s, j) => s === '*' || il.typeName(d.params[j].type, true) === s || il.typeName(d.params[j].type) === s);
+      return sig.every((s, j) => { const a = ALIAS[s] || s; return s === '*' || il.typeName(d.params[j].type, true) === a || il.typeName(d.params[j].type) === a; });
     };
     let cands;
     if (genArgs) {
@@ -591,12 +725,21 @@ export class Interop {
       cands = cands.filter((c) => !c.err && matchSig(c));
       if (!cands.length && err) throw err.err;
     } else if (k) {
-      // generic class instance: its own declared methods, from the runtime class
-      const own = il.runtimeMethods(k);
-      cands = own.filter((d) => d.name === name && matchSig(d));
+      // a runtime class (generic instance, or an object's class): its methods, nearest declaring class first
+      cands = [];
+      for (let c = k, g = 0; c && g < 64 && !cands.length; c = il.parentKlass(c), g++) {
+        let list = il.runtimeMethods(c);
+        if (!list.length) { const ctd = il.tdOfKlass(c); list = ctd >= 0 ? il.methodsOf(ctd).map((m) => il.desc(m)) : []; }
+        cands = list.filter((d) => d.name === name && matchSig(d));
+      }
     } else {
-      cands = il.methodsOf(td).filter((m) => m.name === name).map((m) => il.desc(m)).filter(matchSig);
-      if (!cands.length) { const inh = il.findMethod(td, name, sig); if (inh) cands = [il.desc(inh)]; }
+      // declared here, else on the nearest base type that has it (with the same ambiguity check)
+      cands = [];
+      for (const t of il.hierarchy(td)) {
+        cands = il.methodsOf(t).filter((m) => m.name === name && il.methodPointer(m)).map((m) => il.desc(m)).filter(matchSig);
+        if (!cands.length && t === td) cands = il.methodsOf(t).filter((m) => m.name === name).map((m) => il.desc(m)).filter(matchSig);
+        if (cands.length) break;
+      }
     }
     if (!cands.length) throw new Error(`${il.tdFullName(td)}::${name}${genArgs ? `<${genArgs.join(', ')}>` : ''} not found${sig !== undefined ? ' with that signature' : ''}`);
     if (cands.length > 1) throw new Error(`${il.tdFullName(td)}::${name} has ${cands.length} overloads; pass a signature (parameter count or type names)`);
@@ -609,10 +752,15 @@ export class Interop {
     const il = this.il;
     const ref = typeof name === 'object' && name.td !== undefined ? name : this.typeRef(name);
     let list;
+    limit = Number(limit);
+    if (Number.isNaN(limit)) limit = Infinity;
+    if (limit <= 0) return [];
     if (!ref.generic && this.unity.td.Object >= 0 && il.isSubclassOf(ref.td, this.unity.td.Object)) list = this.unity.objectsOfType(ref.td).filter((p) => this.unity.alive(p));
     else {
       const k = this._klass(ref);
-      list = k ? il.findInstances(k, { limit: Math.min(limit, 5000) }) : [];
+      // heap scan: the class itself plus derived classes (and implementers, for an interface)
+      const klasses = ref.generic ? new Set(k ? [k] : []) : il.subKlasses(ref.td, [k]);
+      list = klasses.size ? il.findInstances(k, { limit: Math.min(limit, 5000), klasses }) : [];
     }
     return list.slice(0, limit).map((p) => this.wrap(p));
   }
@@ -626,15 +774,22 @@ export class Interop {
     return out;
   }
 
+  /** A new, zeroed object of the type (no constructor run), or 0 when this build can't do that. */
+  _allocate(ref) {
+    const il = this.il;
+    const t = il.typeObject(ref.p);
+    for (const [tn, mn] of [['System.Runtime.CompilerServices.RuntimeHelpers', 'GetUninitializedObject'], ['System.Runtime.Serialization.FormatterServices', 'GetUninitializedObject']]) {
+      const m = il.findMethod(tn, mn, ['System.Type']);
+      if (m && !il.whyNotCallable(m)) return il.call(m, 0, t) >>> 0;
+    }
+    return 0;
+  }
+
   construct(name, args) {
     const il = this.il;
     const ref = typeof name === 'object' && name.td !== undefined ? name : this.typeRef(name);
     const t = il.typeObject(ref.p);
-    let obj = 0;
-    for (const [tn, mn] of [['System.Runtime.CompilerServices.RuntimeHelpers', 'GetUninitializedObject'], ['System.Runtime.Serialization.FormatterServices', 'GetUninitializedObject']]) {
-      const m = il.findMethod(tn, mn, ['System.Type']);
-      if (m && !il.whyNotCallable(m)) { obj = il.call(m, 0, t); break; }
-    }
+    let obj = this._allocate(ref);
     let done = false;
     if (!obj) {
       const act = il.findMethod('System.Activator', 'CreateInstance', ['System.Type']);
@@ -648,14 +803,13 @@ export class Interop {
       const m = this.overload(ctors, args, false);
       const isValue = ref.td >= 0 && il.md.typeDef(ref.td).isValueType;
       if (m) this.invoke(m, isValue ? obj + 8 : obj, args);
-      else if (args.length || ctors.length) throw new TypeError(`Il2Cpp.new: no ${ref.name} constructor takes ${args.length} argument(s)`);
+      // a struct with no arguments is its zeroed default value (C# `new Vector3()`), constructors or not
+      else if (args.length || (ctors.length && !isValue)) throw new TypeError(`Il2Cpp.new: no ${ref.name} constructor takes ${args.length} argument(s)`);
     }
     return this.wrap(obj);
   }
 }
 
-/** Struct values use the property name for auto-property backing fields: <Count>k__BackingField → Count. */
-function fieldKey(n) { const m = /^<(.+)>k__BackingField$/.exec(n); return m ? m[1] : n; }
 
 function isSubKlass(il, k, base) {
   for (let c = k, g = 0; c && g < 64; c = il.parentKlass(c), g++) if (c === base) return true;

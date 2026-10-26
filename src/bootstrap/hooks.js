@@ -117,6 +117,14 @@ function hookWasm(boot, W) {
   const origInstantiate = W.instantiate;
   const origStreaming = W.instantiateStreaming;
 
+  // the game's module is the biggest one: a smaller wasm compiled before or after it (a codec, physics or
+  // ML library) doesn't replace it, a bigger one does. n = the new module's size (0: not known yet).
+  const keepCurrent = (n) => {
+    const cur = boot.state.wasm;
+    if (!cur || !cur.exports) return false;
+    if (!n) return !!cur.bytes; // unknown size: only replaces a record whose size wasn't known either
+    return !!cur.bytes && n <= cur.bytes;
+  };
   const begin = (bytes, streaming, url) => {
     const rec = { bytes, streaming, url: url || '', start: boot.now(), ms: null, flavor: null };
     boot.state.wasm = rec;
@@ -199,25 +207,29 @@ function hookWasm(boot, W) {
     if (src instanceof W.Module) {
       const pending = boot.state.wasm && boot.state.wasm.ms == null ? boot.state.wasm : null;
       const p = origInstantiate.apply(this, arguments);
-      if (pending) p.then((inst) => finish(pending, inst, imports), () => {});
+      // compiled elsewhere (WebAssembly.compile): no bytes to analyse, so don't keep anyone waiting for them
+      if (pending) p.then((inst) => { finish(pending, inst, imports); if (!boot._analysisDone) boot.setAnalysis(null); }, () => {});
       return p;
     }
     let bytes = null;
     try { bytes = toBytes(src); } catch (_) { /* ignore */ }
-    if (!bytes || bytes.length < BIG_WASM) return origInstantiate.apply(this, arguments);
+    if (!bytes || bytes.length < BIG_WASM || keepCurrent(bytes.length)) return origInstantiate.apply(this, arguments);
     let copy = null;
-    try { copy = bytes.slice(); } catch (_) { /* detached or too big: skip the analysis */ }
+    // a tool that rewrote the bytes (BananaLoader's direct-call patching) registered the game's own
+    const own = boot.originalBytes && boot.originalBytes.get(src);
+    try { copy = (own || bytes).slice(); } catch (_) { /* detached or too big: skip the analysis */ }
     const rec = begin(bytes.length, false);
     const p = origInstantiate.apply(this, arguments);
     p.then((res) => { finish(rec, res, imports); if (copy) analyse(rec, copy); else boot.setAnalysis(null); },
-      (e) => boot.setPhase('compile', 'error', String(e && e.message || e)));
+      // rewritten bytes (BananaLoader's direct-call patching) that don't compile are retried with the original
+      (e) => boot.setPhase('compile', own ? 'active' : 'error', own ? 'retrying with the original wasm' : String(e && e.message || e)));
     return p;
   };
   MARK.add(instantiate);
   W.instantiate = disguise(instantiate, origInstantiate);
 
   if (origStreaming) {
-    const streaming = function (source, imports) {
+    const streaming = function (source, imports, ...rest) {
       if (!boot.detected) return origStreaming.apply(this, arguments);
       const self = this;
       // the page gets the original Response (its URL keeps the browser's compiled-code cache
@@ -227,11 +239,24 @@ function hookWasm(boot, W) {
         let len = 0;
         try {
           len = resp && resp.headers ? +resp.headers.get('content-length') || 0 : 0;
-          if (resp instanceof Response && !resp.bodyUsed && !(len && len < BIG_WASM / 4)) copyP = resp.clone().arrayBuffer().then((b) => new Uint8Array(b), () => null);
+          // duck-typed: a Response from another frame isn't an instance of ours
+          if (resp && typeof resp.clone === 'function' && !resp.bodyUsed && !(len && len < BIG_WASM / 4)) copyP = resp.clone().arrayBuffer().then((b) => new Uint8Array(b), () => null);
         } catch (_) { copyP = null; }
-        if (!copyP) return origStreaming.call(self, resp, imports);
+        if (!copyP) return origStreaming.call(self, resp, imports, ...rest);
+        // another big module already compiled: only take this one over if it turns out bigger (then it's the game)
+        if (boot.state.wasm && boot.state.wasm.exports) {
+          const p = origStreaming.call(self, resp, imports, ...rest);
+          p.then(async (res) => {
+            const bytes = await copyP;
+            if (!bytes || keepCurrent(bytes.length)) return;
+            const rec = begin(bytes.length, true, resp.url);
+            finish(rec, res, imports);
+            analyse(rec, bytes);
+          }, () => {});
+          return p;
+        }
         const rec = begin(len, true, resp.url);
-        const p = origStreaming.call(self, resp, imports);
+        const p = origStreaming.call(self, resp, imports, ...rest);
         p.then(async (res) => {
           const bytes = await copyP;
           if (bytes) rec.bytes = bytes.length;
@@ -255,6 +280,7 @@ function hookWasm(boot, W) {
 function hookFetch(boot) {
   const orig = window.fetch;
   if (!orig || MARK.has(orig)) return;
+  boot.rawFetch = orig; // our own requests (re-reading the wasm for a dump) aren't the page's downloads
   const wrapped = function (input, init) {
     let url = '';
     if (boot.detected) {
@@ -301,32 +327,37 @@ function hookXhr(boot) {
   const open = P.open;
   const send = P.send;
   const urls = new WeakMap();
-  const tracked = new WeakSet();
+  const current = new WeakMap(); // xhr -> the file record of its latest request (an XHR can be reused)
   const wOpen = function (method, url) {
     try { urls.set(this, abs(url)); } catch (_) { /* ignore */ }
     return open.apply(this, arguments);
   };
+  const listen = (x) => {
+    const f = () => current.get(x);
+    x.addEventListener('progress', (e) => { const r = f(); if (!r) return; r.loaded = e.loaded; if (e.lengthComputable) r.total = e.total; boot.changed(); });
+    x.addEventListener('load', () => {
+      const r = f();
+      if (!r) return;
+      try {
+        r.httpStatus = x.status;
+        try { r.encoding = x.getResponseHeader('content-encoding') || ''; r.type = x.getResponseHeader('content-type') || ''; } catch (_) { /* ignore */ }
+        if (x.status >= 400) { boot.fileDone(r, false, `HTTP ${x.status}`); return; }
+        if (!r.loaded) { const b = x.response; r.loaded = b && b.byteLength || (typeof b === 'string' ? b.length : 0); }
+        if (r.kind === 'manifest') readManifest(boot, x);
+        boot.fileDone(r, true);
+      } catch (_) { /* ignore */ }
+    });
+    x.addEventListener('error', () => { const r = f(); if (r) boot.fileDone(r, false, 'network error'); });
+    x.addEventListener('abort', () => { const r = f(); if (r) boot.fileDone(r, false, 'aborted'); });
+    x.addEventListener('timeout', () => { const r = f(); if (r) boot.fileDone(r, false, 'timed out'); });
+  };
   const wSend = function () {
     try {
       const url = urls.get(this);
-      if (boot.detected && url && BUILD_FILE.test(url) && !tracked.has(this)) {
-        tracked.add(this);
-        const x = this;
-        const f = boot.file(url, 'xhr');
-        x.addEventListener('progress', (e) => { f.loaded = e.loaded; if (e.lengthComputable) f.total = e.total; boot.changed(); });
-        x.addEventListener('load', () => {
-          try {
-            f.httpStatus = x.status;
-            try { f.encoding = x.getResponseHeader('content-encoding') || ''; f.type = x.getResponseHeader('content-type') || ''; } catch (_) { /* ignore */ }
-            if (x.status >= 400) { boot.fileDone(f, false, `HTTP ${x.status}`); return; }
-            if (!f.loaded) { const r = x.response; f.loaded = r && r.byteLength || (typeof r === 'string' ? r.length : 0); }
-            if (f.kind === 'manifest') readManifest(boot, x);
-            boot.fileDone(f, true);
-          } catch (_) { /* ignore */ }
-        });
-        x.addEventListener('error', () => boot.fileDone(f, false, 'network error'));
-        x.addEventListener('abort', () => boot.fileDone(f, false, 'aborted'));
-      }
+      if (boot.detected && url && BUILD_FILE.test(url)) {
+        if (!current.has(this)) listen(this);
+        current.set(this, boot.file(url, 'xhr'));
+      } else if (current.has(this)) current.set(this, null); // reused for something that isn't a build file
     } catch (_) { /* never break the request */ }
     return send.apply(this, arguments);
   };

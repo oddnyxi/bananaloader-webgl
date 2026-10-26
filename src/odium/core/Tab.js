@@ -1,4 +1,5 @@
 import { Container } from './Container.js';
+import { releaseInside } from './Handle.js';
 import { el } from '../utils/dom.js';
 import { makeIcon } from '../utils/icons.js';
 
@@ -14,10 +15,19 @@ export class Tab extends Container {
     s.textContent = name;
     this.btn.appendChild(s);
     this.btn.onclick = () => ui.selectTab(this);
+    this._hotkeyAction = () => { ui.show && ui.show(); ui.selectTab(this); };
     this.setIcon(o.icon);
   }
 
-  setVisible(v) { this.btn.style.display = v ? '' : 'none'; return this; }
+  setVisible(v) {
+    this.btn.style.display = v ? '' : 'none';
+    // hiding the open tab moves to the first visible one, so its page doesn't linger
+    if (!v && this.ui.active === this) {
+      const next = this.ui.tabs.find((t) => t !== this && t.btn.style.display !== 'none');
+      if (next) this.ui.selectTab(next); else this.page.classList.remove('on');
+    }
+    return this;
+  }
 
   setIcon(icon) {
     if (this._ic) { this._ic.remove(); this._ic = null; }
@@ -46,10 +56,25 @@ export class Tab extends Container {
     return this;
   }
 
+  /** Remove the tab, its page, and every control on it (config keys, hotkeys, keybinds). */
   destroy() {
+    const ui = this.ui;
+    releaseInside(ui, this.page);
+    this._release();
+    // a group heading left with no tabs under it goes too
+    const prev = this.btn.previousElementSibling;
+    const next = this.btn.nextElementSibling;
     this.btn.remove();
     this.page.remove();
-    this.ui.tabs = this.ui.tabs.filter((t) => t !== this);
-    if (this.ui.active === this && this.ui.tabs[0]) this.ui.selectTab(this.ui.tabs[0]);
+    if (prev && prev.classList.contains('sgroup') && (!next || next.classList.contains('sgroup'))) {
+      prev.remove();
+      if (ui._lastGroup === this.group && !next) ui._lastGroup = undefined;
+    }
+    ui.tabs = ui.tabs.filter((t) => t !== this);
+    if (ui.active === this) {
+      ui.active = null;
+      const first = ui.tabs.find((t) => t.btn.style.display !== 'none') || ui.tabs[0];
+      if (first) ui.selectTab(first);
+    }
   }
 }

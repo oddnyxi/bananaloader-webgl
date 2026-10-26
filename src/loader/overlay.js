@@ -23,6 +23,7 @@ export class Overlay {
         g.font = `${o.weight || 600} ${o.size || 13}px ${o.font || 'Inter, system-ui, sans-serif'}`;
         g.textAlign = o.align || 'left';
         g.textBaseline = o.baseline || 'top';
+        x = Number(x) || 0; y = Number(y) || 0;
         if (o.shadow !== false) { g.fillStyle = 'rgba(0,0,0,.75)'; g.fillText(String(str), x + 1, y + 1); }
         g.fillStyle = o.color || '#ececf1';
         g.fillText(String(str), x, y);

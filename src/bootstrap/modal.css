@@ -42,7 +42,7 @@
   animation: enterCorner .45s cubic-bezier(.2,.9,.25,1) both;
 }
 .ub.pill .card, .ub.hidden .card { display: none; }
-.ub.leaving .card { opacity: 0; transform: translate(-50%, calc(-50% + 14px)) scale(.97); }
+.ub.leaving .card { animation: none; opacity: 0; transform: translate(-50%, calc(-50% + 14px)) scale(.97); }
 .ub.leaving .backdrop { opacity: 0; }
 
 @keyframes enter { from { opacity: 0; transform: translate(-50%, calc(-50% + 18px)) scale(.96); } to { opacity: 1; transform: translate(-50%, -50%); } }
@@ -243,7 +243,7 @@ td.name { max-width: 210px; white-space: nowrap; overflow: hidden; text-overflow
 .ub.done .pillbtn .pe::before { animation: none; border-color: var(--red-hi); background: rgba(var(--rgb), .15); }
 .ub.failed .pillbtn .pe::before { animation: none; border-color: #ff5967; }
 .pillbtn .pp { font: 600 11px var(--mono); color: var(--red-hi); }
-.ub.fade .pillbtn { opacity: 0; transform: translateY(10px); pointer-events: none; }
+.ub.fade .pillbtn { animation: none; opacity: 0; transform: translateY(10px); pointer-events: none; }
 
 .toast { position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%); background: #18181d; border: 1px solid var(--line-hi); padding: 7px 12px; border-radius: 8px; font-size: 12px; pointer-events: none; opacity: 0; transition: opacity .25s; }
 .toast.on { opacity: 1; }

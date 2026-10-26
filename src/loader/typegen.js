@@ -34,6 +34,22 @@ export class TypeGen {
       this.included.add(t);
     }
     this.publicOnly = publicOnly;
+    // Action and Action`1 live side by side in C#; in TypeScript they'd merge, so siblings that only
+    // differ by generic arity keep it in their name (Action, Action_1, Action_2).
+    this._names = new Map();
+    const groups = new Map();
+    for (const t of this.included) {
+      const k = this._ns(t) + '|' + this._local(t);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(t);
+    }
+    for (const list of groups.values()) {
+      if (list.length < 2) continue;
+      for (const t of list) {
+        const ar = /`(\d+)$/.exec(md.typeDef(t).name);
+        if (ar) this._names.set(t, this._local(t) + '_' + ar[1]);
+      }
+    }
     // group by namespace
     const byNs = new Map();
     for (const t of this.included) {
@@ -58,10 +74,14 @@ export class TypeGen {
     out.push('}');
     out.push('');
     out.push('interface Il2CppTypeMap {');
+    const mapped = new Set();
     for (const t of [...this.included].sort((a, b) => il.tdFullName(a).localeCompare(il.tdFullName(b)))) {
       const d = md.typeDef(t);
       if (d.isGeneric) continue;
-      out.push(`  ${JSON.stringify(il.tdFullName(t))}: [${this._ref(t)}, ${this._ref(t)}$Static];`);
+      const fullName = il.tdFullName(t);
+      if (mapped.has(fullName)) continue; // same name in two assemblies: the first one wins
+      mapped.add(fullName);
+      out.push(`  ${JSON.stringify(fullName)}: [${this._ref(t)}, ${this._ref(t)}$Static];`);
     }
     out.push('}');
     return out.join('\n') + '\n';
@@ -93,6 +113,7 @@ export class TypeGen {
 
   /** Name inside its namespace: Outer$Inner, generic arity removed. */
   _local(t) {
+    if (this._names && this._names.has(t)) return this._names.get(t);
     const il = this.il;
     const parts = [];
     let x = t;
@@ -173,7 +194,7 @@ export class TypeGen {
     if (d.isEnum) {
       lines.push(`/** enum ${full} */`);
       lines.push(`type ${name} = number;`);
-      lines.push(`interface ${name}$Static {`);
+      lines.push(`interface ${name}$Static extends Il2CppTypeProxy<number> {`);
       for (const [n, v] of il.enumMembers(t)) lines.push(`  readonly ${key(n)}: ${typeof v === 'bigint' ? 'bigint' : 'number'}; // ${v}`);
       lines.push('}');
       return lines;
@@ -190,32 +211,42 @@ export class TypeGen {
     const inst = [];
     const stat = [];
     const sctx = new Set(); // generic parameters aren't in scope on the static side
+    // properties first: an auto-property's backing field then doesn't repeat its name
+    const accessorNames = new Set();
+    const propLines = { inst: [], stat: [] };
+    const propNames = { inst: new Set(), stat: new Set() };
+    const isPublic = (m) => m && (m.flags & METHOD.ACCESS) === METHOD.PUBLIC;
+    for (const p of il.propertiesOf(t)) {
+      const acc = p.getter || p.setter;
+      if (!acc) continue;
+      // indexers (this[i]) are called as get_Item / set_Item
+      if (p.getter ? p.getter.parameterCount : il.params(p.setter).length > 1) continue;
+      if (p.getter) accessorNames.add(p.getter.name);
+      if (p.setter) accessorNames.add(p.setter.name);
+      const getter = this.publicOnly && !isPublic(p.getter) ? null : p.getter;
+      const setter = this.publicOnly && !isPublic(p.setter) ? null : p.setter;
+      if (!getter && !setter) continue;
+      const isSt = ((getter || setter).flags & METHOD.STATIC) !== 0;
+      const pc = isSt ? sctx : ctx;
+      const ty = p.getter ? this.ts(il.typePtr(p.getter.returnType), pc) : this.ts(il.params(p.setter)[0].type, pc);
+      const line = `${getter && !setter ? 'readonly ' : ''}${key(p.name)}: ${ty};`;
+      if (isSt) { propLines.stat.push(line); propNames.stat.add(p.name); }
+      else if (!d.isValueType) { propLines.inst.push(line); propNames.inst.add(p.name); } // structs arrive as plain { field } objects
+    }
     // fields
     for (const f of il.fieldsOf(t)) {
       const acc = f.attrs & FIELD.ACCESS;
       if (this.publicOnly && acc !== FIELD.PUBLIC) continue;
       const fname = (/^<(.+)>k__BackingField$/.exec(f.name) || [])[1] || f.name;
       const isSt = (f.attrs & (FIELD.STATIC | FIELD.LITERAL)) !== 0;
+      if (fname !== f.name && propNames[isSt ? 'stat' : 'inst'].has(fname)) continue;
       const ty = this.ts(f.type, isSt ? sctx : ctx);
       const ro = f.attrs & (FIELD.LITERAL | FIELD.INIT_ONLY) ? 'readonly ' : '';
-      if (f.attrs & (FIELD.STATIC | FIELD.LITERAL)) stat.push(`${ro}${key(fname)}: ${ty};`);
+      if (isSt) stat.push(`${ro}${key(fname)}: ${ty};`);
       else inst.push(`${ro}${key(fname)}: ${ty};`);
     }
-    // properties
-    const accessorNames = new Set();
-    for (const p of il.propertiesOf(t)) {
-      const acc = p.getter || p.setter;
-      if (!acc) continue;
-      if (p.getter && p.getter.parameterCount) continue;
-      if (p.getter) accessorNames.add(p.getter.name);
-      if (p.setter) accessorNames.add(p.setter.name);
-      if (this.publicOnly && (acc.flags & METHOD.ACCESS) !== METHOD.PUBLIC) continue;
-      const pc = (acc.flags & METHOD.STATIC) ? sctx : ctx;
-      const ty = p.getter ? this.ts(il.typePtr(p.getter.returnType), pc) : this.ts(il.params(p.setter)[0].type, pc);
-      const line = `${p.getter && !p.setter ? 'readonly ' : ''}${key(p.name)}: ${ty};`;
-      if (acc.flags & METHOD.STATIC) stat.push(line);
-      else if (!d.isValueType) inst.push(line); // structs arrive as plain { field } objects
-    }
+    stat.push(...propLines.stat);
+    inst.push(...propLines.inst);
     // methods (overloads grouped; generic methods get .of())
     const groups = new Map();
     for (const m of il.methodsOf(t)) {

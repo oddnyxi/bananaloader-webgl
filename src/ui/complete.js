@@ -15,7 +15,8 @@ const KIND_LABEL = {
 const MAX_ROWS = 10;
 
 export function attachComplete(ta, { completer, context, enabled = () => true }) {
-  const root = ta.getRootNode && ta.getRootNode() !== document ? ta.getRootNode() : document.body;
+  // the textarea may not be in the document yet: look its root up when it's needed
+  const rootNode = () => { const r = ta.getRootNode ? ta.getRootNode() : document; return r && r !== ta ? r : document; };
   const box = document.createElement('div');
   box.className = 'ac';
   box.hidden = true;
@@ -34,7 +35,15 @@ export function attachComplete(ta, { completer, context, enabled = () => true })
   hintBox.append(hintEl);
   let mounted = false;
   // inside the window's .root so the theme variables (accent colour) apply
-  const mount = () => { if (!mounted) { (ta.closest('.root') || (root.appendChild ? root : document.body)).append(box, hintBox); mounted = true; } };
+  const mount = () => {
+    if (mounted) return;
+    const r = rootNode();
+    (ta.closest('.root') || (r !== document && r.appendChild ? r : document.body)).append(box, hintBox);
+    mounted = true;
+  };
+  // clicks in the popup (its scrollbar, the hint) keep the focus in the textarea
+  for (const n of [box, hintBox]) n.addEventListener('mousedown', (e) => e.preventDefault());
+  let destroyed = false;
 
   let state = null; // { from, to, items, sel, hint }
   let manual = false;
@@ -43,7 +52,7 @@ export function attachComplete(ta, { completer, context, enabled = () => true })
   const close = () => { state = null; box.hidden = true; hintBox.hidden = true; manual = false; };
 
   function compute(force) {
-    if (!enabled()) { close(); return; }
+    if (destroyed || !enabled()) { close(); return; }
     const c = completer();
     if (!c) { close(); return; }
     const pos = ta.selectionStart;
@@ -52,7 +61,7 @@ export function attachComplete(ta, { completer, context, enabled = () => true })
     try { r = c.complete(ta.value, pos, context() || {}, force || manual); } catch (e) { r = null; console.debug('[complete]', e); }
     if (!r || (!r.items.length && !r.hint)) { close(); return; }
     const prevLabel = state && state.items[state.sel] ? state.items[state.sel].label : null;
-    state = { ...r, sel: 0, v: ta.value, pos };
+    state = { ...r, items: r.items.slice(0, 200), sel: 0, v: ta.value, pos }; // only 200 rows are ever rendered
     if (prevLabel) { const i = r.items.findIndex((x) => x.label === prevLabel); if (i >= 0 && r.prefix) state.sel = i; }
     // a single exact match that's already typed isn't worth a popup
     if (r.items.length === 1 && r.items[0].label === r.prefix && !force) state.items = [];
@@ -140,8 +149,10 @@ export function attachComplete(ta, { completer, context, enabled = () => true })
     const ins = it.insert || it.label;
     const close2 = it.close || '';
     const after = ta.value.slice(st.to);
-    // don't double up a call's parentheses if they're already there
-    const skipClose = close2 && after.startsWith(close2[0]);
+    // don't double up a closing ) or ') that's already there, unless it belongs to an outer call:
+    // Debug.Log(go.Get|) keeps Log's ) and adds GetComponent's own
+    let skipClose = false;
+    if (close2 && after.startsWith(close2)) skipClose = !close2.endsWith(')') || !unclosed(ta.value.slice(0, st.from), '(', ')');
     const text = ins + (skipClose ? '' : close2);
     suppress = true;
     ta.focus();
@@ -158,25 +169,26 @@ export function attachComplete(ta, { completer, context, enabled = () => true })
   function move(d) {
     if (!state || !state.items.length) return;
     const n = Math.min(state.items.length, 200);
-    state.sel = (state.sel + d + n) % n;
+    state.sel = (((state.sel + d) % n) + n) % n;
     render();
   }
 
   ta.addEventListener('input', (e) => {
-    if (suppress) return;
+    if (suppress || destroyed) return;
     const pos = ta.selectionStart;
     const ch = ta.value[pos - 1] || '';
     const typed = e.inputType && e.inputType.startsWith('insert');
     if (state || manual || (typed && /[\w$.('"<,]/.test(ch))) schedule(false);
     else close();
   });
-  ta.addEventListener('blur', () => setTimeout(() => { if (root.activeElement !== ta && document.activeElement !== ta) close(); }, 120));
+  ta.addEventListener('blur', () => setTimeout(() => { const r = rootNode(); if (r.activeElement !== ta && document.activeElement !== ta) close(); }, 120));
   ta.addEventListener('click', () => { if (state) schedule(false); });
   ta.addEventListener('scroll', () => { if (state) render(); });
 
   return {
     /** Call first from the textarea's keydown handler; returns true when the key was used. */
     key(e) {
+      if (destroyed) return false;
       if ((e.ctrlKey || e.metaKey) && (e.key === ' ' || e.code === 'Space')) { e.preventDefault(); manual = true; compute(true); return true; }
       if (!state) return false;
       if (state.v !== ta.value || state.pos !== ta.selectionStart) compute(false); // stale: text changed under us
@@ -198,8 +210,22 @@ export function attachComplete(ta, { completer, context, enabled = () => true })
     refresh: () => schedule(false),
     get open() { return !!(state && state.items.length); },
     get state() { return state && { from: state.from, to: state.to, prefix: state.prefix, sel: state.sel, items: state.items.slice(0, 5).map((x) => x.label), hint: !!state.hint }; },
-    destroy() { close(); box.remove(); hintBox.remove(); },
+    destroy() { destroyed = true; close(); box.remove(); hintBox.remove(); mounted = false; },
   };
+}
+
+/** Is there an `open` bracket in `text` that no `close` matches? (strings skipped, roughly) */
+function unclosed(text, open, close) {
+  let depth = 0;
+  let q = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) { if (c === '\\') i++; else if (c === q) q = null; continue; }
+    if (c === '"' || c === "'" || c === '`') q = c;
+    else if (c === open) depth++;
+    else if (c === close && depth > 0) depth--;
+  }
+  return depth > 0;
 }
 
 function el(tag, cls, text) {

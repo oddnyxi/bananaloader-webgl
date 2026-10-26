@@ -3,6 +3,8 @@
 
 const td8 = new TextDecoder('utf-8');
 const td16 = new TextDecoder('utf-16le');
+// threaded builds use a SharedArrayBuffer heap, and TextDecoder rejects views of shared memory
+const SAB = typeof SharedArrayBuffer === 'function' ? SharedArrayBuffer : null;
 
 export class Memory {
   constructor(memory) {
@@ -14,6 +16,7 @@ export class Memory {
     const b = this.memory.buffer;
     if (b === this._buf) return;
     this._buf = b;
+    this.shared = !!(SAB && b instanceof SAB);
     this.u8 = new Uint8Array(b);
     this.i8 = new Int8Array(b);
     this.u16 = new Uint16Array(b);
@@ -61,13 +64,13 @@ export class Memory {
     let e = p;
     const lim = Math.min(u8.length, p + max);
     while (e < lim && u8[e]) e++;
-    return td8.decode(u8.subarray(p, e));
+    return td8.decode(this.shared ? u8.slice(p, e) : u8.subarray(p, e));
   }
 
   /** `len` UTF-16 code units starting at p. */
   utf16(p, len) {
     this._sync();
-    return td16.decode(this.u8.subarray(p, p + len * 2));
+    return td16.decode(this.shared ? this.u8.slice(p, p + len * 2) : this.u8.subarray(p, p + len * 2));
   }
 
   bytes(p, n) { this._sync(); return this.u8.slice(p, p + n); }
@@ -94,11 +97,11 @@ export class Memory {
     this._sync();
     const u32 = this.u32;
     const out = [];
-    const end = Math.min(to >>> 2, u32.length);
+    const end = Math.min(Math.floor(to / 4), u32.length); // `to >>> 2` wraps to 0 on a 4 GiB heap
     value >>>= 0;
-    for (let i = from >>> 2; i < end; i++) {
+    for (let i = Math.floor(from / 4); i < end; i++) {
       if (u32[i] === value) {
-        out.push(i << 2);
+        out.push(i * 4); // i << 2 goes negative above 2 GiB
         if (out.length >= limit) break;
       }
     }

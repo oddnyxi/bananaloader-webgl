@@ -58,6 +58,10 @@ export class PrefsView {
       case 'bool': return g.createToggle(e.name, set, e.value, o);
       case 'key': return g.createKeybind(e.name, (k) => { if (k !== undefined) set(k); }, { ...o, value: e.value });
       case 'color': return g.createColorPicker(e.name, set, { ...o, value: e.value });
+      case 'json': {
+        const text = (v) => { try { return JSON.stringify(v); } catch (_) { return ''; } };
+        return g.createTextInput(e.name, (v) => { try { set(JSON.parse(v)); } catch (_) { this.app.notify(`${e.name}: not valid JSON`, 'error'); } }, { ...o, value: text(e.value), placeholder: text(e.default) });
+      }
       case 'number':
         if (e.min != null && e.max != null) return g.createSlider(e.name, set, { ...o, min: e.min, max: e.max, step: e.step ?? ((e.max - e.min) / 100 || 1), value: e.value });
         return g.createNumberInput(e.name, set, { ...o, min: e.min, max: e.max, step: e.step ?? 1, value: e.value });

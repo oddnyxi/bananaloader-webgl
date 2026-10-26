@@ -52,9 +52,11 @@ export function createRangeSlider(text, action, o = {}) {
   };
   track.onpointermove = move;
   track.onpointerup = () => { which = 0; };
+  const order = () => { if (lo > hi) [lo, hi] = [hi, lo]; };
+  lo = snap(lo); hi = snap(hi); order();
   paint();
 
   c.getValue = () => [lo, hi];
-  c.setValue = (a, silent) => { lo = snap(a[0]); hi = snap(a[1]); paint(); if (!silent) c._out(action, [lo, hi]); return c; };
+  c.setValue = (a, silent) => { lo = snap(+a[0]); hi = snap(+a[1]); order(); paint(); if (!silent) c._out(action, [lo, hi]); return c; };
   return this._reg(c, text, o);
 }

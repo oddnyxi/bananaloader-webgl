@@ -6,7 +6,9 @@ export function h(sel, props, ...kids) {
   if (props && (typeof props !== 'object' || props instanceof Node || Array.isArray(props))) { kids.unshift(props); props = null; }
   if (props) {
     for (const [k, v] of Object.entries(props)) {
-      if (v == null || v === false) continue;
+      if (v == null) continue;
+      // false turns boolean properties off (spellcheck: false); otherwise it means "leave out"
+      if (v === false) { if (k in e && typeof e[k] === 'boolean') e[k] = false; continue; }
       if (k === 'on') for (const [ev, fn] of Object.entries(v)) e.addEventListener(ev, fn);
       else if (k === 'html') e.innerHTML = v;
       else if (k === 'text') e.textContent = v;
@@ -39,15 +41,19 @@ export function debounce(fn, ms) {
   return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
 
-export function copy(text) {
-  try { navigator.clipboard.writeText(text); return true; } catch (_) {
+/** Copy text. Resolves true when it reached the clipboard (async API, then execCommand as a fallback). */
+export async function copy(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch (_) {
     const ta = document.createElement('textarea');
     ta.value = text;
-    document.body.appendChild(ta);
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    (document.body || document.documentElement).appendChild(ta);
     ta.select();
-    try { document.execCommand('copy'); } catch (__) { /* ignore */ }
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (__) { /* ignore */ }
     ta.remove();
-    return true;
+    return ok;
   }
 }
 

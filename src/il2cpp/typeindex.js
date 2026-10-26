@@ -126,6 +126,14 @@ export class TypeIndex {
   scope(interop, { unityFirst = false } = {}) {
     const self = this;
     const nsCache = new Map();
+    // a type in namespace ns by its short name; generic types by arity-stripped name ("List" → List`1)
+    const typeIn = (ns, k) => {
+      const td = self.il.findType(`${ns}.${k}`);
+      if (td >= 0) return td;
+      const cands = (self.namespaceMembers(ns).types || []).filter((e) => e.short === k);
+      cands.sort((a, b) => a.arity - b.arity);
+      return cands.length ? cands[0].td : -1;
+    };
     const nsProxy = (ns) => {
       if (nsCache.has(ns)) return nsCache.get(ns);
       const p = new Proxy(Object.create(null), {
@@ -133,15 +141,17 @@ export class TypeIndex {
           if (typeof k !== 'string') return undefined;
           if (k === 'toString') return () => `[Il2Cpp namespace ${ns}]`;
           if (k === 'then') return undefined;
-          const child = `${ns}.${k}`;
-          const td = self.il.findType(child);
+          const td = typeIn(ns, k);
           if (td >= 0) return interop.typeProxy(td);
-          if (self.isNamespace(child)) return nsProxy(child);
+          if (self.isNamespace(`${ns}.${k}`)) return nsProxy(`${ns}.${k}`);
           return undefined;
         },
-        has(_, k) { return typeof k === 'string' && (self.il.findType(`${ns}.${k}`) >= 0 || self.isNamespace(`${ns}.${k}`)); },
+        has(_, k) { return typeof k === 'string' && (typeIn(ns, k) >= 0 || self.isNamespace(`${ns}.${k}`)); },
         ownKeys() { const m = self.namespaceMembers(ns); return [...new Set([...m.namespaces, ...m.types.map((e) => e.short)])]; },
-        getOwnPropertyDescriptor(_, k) { return { configurable: true, enumerable: true, value: this.get(_, k) }; },
+        getOwnPropertyDescriptor(_, k) {
+          if (!this.has(_, k)) return undefined;
+          return { configurable: true, enumerable: true, value: this.get(_, k) };
+        },
         set() { return false; },
       });
       nsCache.set(ns, p);

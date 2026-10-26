@@ -22,6 +22,7 @@ const h = (tag, cls, html) => { const e = document.createElement(tag); if (cls) 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 const setText = (el, t) => { t = String(t ?? ''); if (el.textContent !== t) el.textContent = t; };
 const setCls = (el, c) => { if (el.className !== c) el.className = c; };
+const safeJson = (v) => { try { return JSON.stringify(v, (k, x) => (typeof x === 'bigint' ? x + 'n' : x)); } catch (_) { return String(v); } };
 
 /** Reuse one element per key so rows animate in once and then just update. */
 function syncList(box, items, key, make, update) {
@@ -121,9 +122,15 @@ export class BootModal {
       this.action(t.dataset.act);
     });
     (document.documentElement || document.body).appendChild(host);
+    this._startTick();
+  }
+
+  /** Re-render 5×/s while loading (timers, speeds); stops itself when hidden or finished. */
+  _startTick() {
+    if (this._tick) return;
     this._tick = setInterval(() => {
-      if (this.mode === 'hidden') { clearInterval(this._tick); this._tick = null; return; }
-      if (!this.boot.finished && this.mode) this.schedule();
+      if (this.mode === 'hidden' || this.boot.finished) { clearInterval(this._tick); this._tick = null; return; }
+      if (this.mode) this.schedule();
     }, 200);
   }
 
@@ -139,7 +146,7 @@ export class BootModal {
   setMode(m) {
     if (!this.host) this.mount();
     this.mode = m;
-    if (m !== 'hidden' && !this._tick) this._tick = setInterval(() => { if (!this.boot.finished && this.mode && this.mode !== 'hidden') this.schedule(); }, 200);
+    if (m !== 'hidden') this._startTick();
     for (const t of this._timers.splice(0)) clearTimeout(t);
     this.el.classList.remove('leaving', 'fade');
     this.render();
@@ -165,8 +172,10 @@ export class BootModal {
   _fallbackCopy(text) {
     const ta = document.createElement('textarea');
     ta.value = text; ta.style.cssText = 'position:fixed;left:-9999px;top:0';
-    document.body.appendChild(ta); ta.select();
-    try { document.execCommand('copy'); this.toast('Bootstrap report copied'); } catch (_) { this.toast('Copy failed'); }
+    (document.body || document.documentElement).appendChild(ta); ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+    this.toast(ok ? 'Bootstrap report copied' : 'Copy failed: use Ctrl+C in the Log tab');
     ta.remove();
   }
 
@@ -188,24 +197,33 @@ export class BootModal {
   // ------------------------------------------------------------------ finishing
 
   _onFinish() {
-    if (this._finishedHandled) return;
-    this._finishedHandled = true;
     const b = this.boot;
-    if (b.failed) {
+    const state = b.failed ? 'failed' : 'ok';
+    // a failure sticks while it lasts; a phase that recovered (e.g. a retried compile) lets the normal finish run
+    if (this._finishedHandled === state || (this._finishedHandled === 'failed' && b.failed)) return;
+    const after = this._finishedHandled; // a tool can fail after everything else was ready
+    this._finishedHandled = state;
+    if (state === 'failed') {
       // the game may well be running: say what failed without covering it
-      if (b.settings.modal !== 'off' && !this.pinned) this.setMode('compact');
+      for (const t of this._timers.splice(0)) clearTimeout(t);
+      if (b.settings.modal !== 'off' && !this.pinned && (this.mode !== 'hidden' || after === 'ok')) this.setMode('compact');
       return;
     }
-    if (!b.settings.autoHide || this.pinned) return;
+    if (b.settings.autoHide === false || this.pinned) return;
     const later = (ms, fn) => this._timers.push(setTimeout(fn, ms));
-    later(this.mode === 'full' ? 1500 : 1100, () => {
+    // pill for a few seconds, then fade away (setMode clears pending timers, so schedule after it)
+    const toPill = () => {
       if (this.pinned) return;
-      if (this.mode === 'full') { this.el.classList.add('leaving'); later(380, () => this.setMode('pill')); } else this.setMode('pill');
-      this._timers.push(setTimeout(() => {
+      this.setMode('pill');
+      later(6500, () => {
         if (this.pinned || this.mode !== 'pill') return;
         this.el.classList.add('fade');
-        this._timers.push(setTimeout(() => { if (this.mode === 'pill' && !this.pinned) this.setMode('hidden'); }, 600));
-      }, 6500));
+        later(600, () => { if (this.mode === 'pill' && !this.pinned) this.setMode('hidden'); });
+      });
+    };
+    later(this.mode === 'full' ? 1500 : 1100, () => {
+      if (this.pinned) return;
+      if (this.mode === 'full') { this.el.classList.add('leaving'); later(380, toPill); } else toPill();
     });
   }
 
@@ -218,10 +236,12 @@ export class BootModal {
     const ub = this.el;
     const finished = b.finished;
     const failed = b.failed;
-    if (finished) this._onFinish();
+    // a failure before the tools attach (every download failed, the loader rejected) must not
+    // leave the full-screen card up for good
+    if (finished || failed) this._onFinish();
     setCls(ub, `ub ${this.mode || 'hidden'}${this.open ? ' open' : ''}${finished && !failed ? ' done' : ''}${failed ? ' failed' : ''}${ub.classList.contains('leaving') ? ' leaving' : ''}${ub.classList.contains('fade') ? ' fade' : ''}`);
-    if (this.mode === 'hidden') return;
     if (this.mode === 'full') ub.setAttribute('aria-modal', 'true'); else ub.removeAttribute('aria-modal');
+    if (this.mode === 'hidden') return;
 
     // ---- header
     const c = s.config;
@@ -243,7 +263,8 @@ export class BootModal {
     // ---- progress
     const p = failed ? Math.max(0.04, b.overall()) : b.overall();
     this.$('.fill').style.width = `${(finished && !failed ? 1 : p) * 100}%`;
-    setText(this.$('.pct'), failed ? 'ERR' : `${Math.round((finished ? 1 : p) * 100)}%`);
+    const pct = finished ? 100 : Math.min(99, Math.round(p * 100)); // 100% only once it's really done
+    setText(this.$('.pct'), failed ? 'ERR' : `${pct}%`);
     const act = this._activity();
     const ae = this.$('.activity');
     if (ae.__h !== act) { ae.innerHTML = act; ae.__h = act; } // the live region only changes when its text does
@@ -253,6 +274,7 @@ export class BootModal {
     if (s.unsupported) errs.push(`<b>Unsupported build.</b> ${esc(s.unsupported)}`);
     for (const cl of b.clients) if (cl.status === 'error') errs.push(`<b>${esc(cl.name)} couldn't attach.</b> ${esc(cl.summary)}`);
     for (const ph of b.phases) if (ph.status === 'error' && !s.unsupported) errs.push(`<b>${esc(ph.label)} failed.</b> ${esc(ph.detail)}`);
+    if (s.error && !s.unsupported && !b.clients.some((cl) => cl.status === 'error')) errs.push(`<b>Error.</b> ${esc(s.error.message)}`);
     const ab = this.$('.alertbox');
     const ah = errs.length ? `<div class="alert">${errs.join('<br>')}<br><span style="color:var(--mute)">Use <b style="color:var(--text)">Copy report</b> and include it in a bug report.</span></div>` : '';
     if (ab.__h !== ah) { ab.innerHTML = ah; ab.__h = ah; }
@@ -292,7 +314,7 @@ export class BootModal {
     // ---- pill
     const pt = this.$('.pt');
     setText(pt, failed ? 'Bootstrap failed · details' : finished ? `Ready in ${fmtMs(b.finishedAt)}` : this._shortActivity());
-    setText(this.$('.pp'), finished || failed ? '' : `${Math.round(p * 100)}%`);
+    setText(this.$('.pp'), finished || failed ? '' : `${pct}%`);
   }
 
   _stepEl() { return h('li', 'step', '<span class="ico"></span><div><div class="lbl"></div><div class="det"></div></div><span class="t"></span>'); }
@@ -315,7 +337,7 @@ export class BootModal {
     const total = files.reduce((a, f) => a + (f.total || 0), 0);
     const t0 = Math.min(...files.map((f) => f.start));
     const secs = Math.max(0.2, (this.boot.now() - t0) / 1000);
-    const speed = loaded / secs;
+    const speed = Math.round(loaded / secs);
     const busy = files.filter((f) => f.status === 'loading').map((f) => f.name);
     return `<span>Downloading ${esc(busy.slice(0, 2).join(', ') || 'build')}</span> <span class="sub">· ${fmtBytes(loaded)}${total && total >= loaded ? ' / ' + fmtBytes(total) : ''} · ${fmtBytes(speed)}/s</span>`;
   }
@@ -366,7 +388,7 @@ export class BootModal {
         mini.firstChild.firstChild.style.width = `${frac * 100}%`;
         setText(enc, f.encoding || (/\.unityweb$/i.test(f.name) ? 'unityweb' : '–'));
         setText(via, f.via);
-        setText(tm, f.end != null ? fmtMs(f.end - f.start) : f.status === 'error' ? f.error : '…');
+        setText(tm, f.status === 'error' ? f.error || 'failed' : f.end != null ? fmtMs(f.end - f.start) : '…');
       });
     } else if (this.tab === 'runtime') {
       const w = s.wasm;
@@ -387,7 +409,7 @@ export class BootModal {
         ['Module', s.runtime ? `captured at +${fmtMs(s.runtime.at)} via ${s.runtime.how || '?'}` : 'not yet'],
         ['Runtime started', s.runtime && s.runtime.startedAt != null ? `+${fmtMs(s.runtime.startedAt)}` : 'not yet'],
       ];
-      if (b.facts) for (const [k, v] of b.facts) if (k !== 'Unity') rows.push([k, v]);
+      if (b.facts) for (const [k, v] of b.facts) if (k !== 'Unity') rows.push([k, typeof v === 'bigint' ? v + 'n' : typeof v === 'object' ? safeJson(v) : v]);
       this._kv(this.$('.rt'), rows);
     } else if (this.tab === 'env') {
       this._kv(this.$('.envkv'), [['Page', location.host + location.pathname], ...envLines().map((l) => { const i = l.indexOf(':'); return [l.slice(0, i), l.slice(i + 1).trim()]; })]);
@@ -407,7 +429,7 @@ export class BootModal {
   }
 
   _kv(box, rows) {
-    const key = JSON.stringify(rows);
+    const key = safeJson(rows);
     if (box.__k === key) return;
     box.__k = key;
     box.innerHTML = rows.map(([k, v]) => `<div class="k">${esc(k)}</div><div class="v">${esc(v)}</div>`).join('');

@@ -49,11 +49,10 @@ export function findRegistrations(mem, md, limit) {
 
   // ---- Il2CppCodeGenModule[] via the module named after the first image (normally mscorlib.dll)
   const enc = new TextEncoder();
-  const isName = (p) => {
-    if (!ptr(p)) return false;
-    const s = m.cstr(p, 128);
-    return s.length > 2 && /^[\w.\-]+$/.test(s);
-  };
+  // module names are the image names (spaces, '+', non-ASCII… included), so check against those
+  const imageNames = new Set(md.images.map((x) => x.name));
+  const isName = (p) => ptr(p) && imageNames.has(m.cstr(p, 512));
+  let best = null;
   for (const img of md.images) {
     const sAddr = m.find([...enc.encode(img.name), 0], 0, limit);
     if (sAddr < 0) continue;
@@ -74,18 +73,44 @@ export function findRegistrations(mem, md, limit) {
         // Il2CppCodeRegistration has [codeGenModulesCount, codeGenModules] somewhere
         const regs = m.refs(arr, 0, limit).filter((r) => u32[(r >>> 2) - 1] >= n - 2 && u32[(r >>> 2) - 1] <= n + 2);
         const count2 = regs.length ? u32[(regs[0] >>> 2) - 1] : n;
+        // each candidate array is judged on its own (stale modules from a failed one don't count)
+        const modules = new Map();
         for (let k = 0; k < count2; k++) {
           const mp = u32[a + k];
           if (!ptr(mp)) continue;
-          const name = m.cstr(u32[mp >>> 2], 256);
-          out.modules.set(name, { addr: mp, methodPointerCount: u32[(mp >>> 2) + 1], methodPointers: u32[(mp >>> 2) + 2] });
+          const name = m.cstr(u32[mp >>> 2], 512);
+          if (!imageNames.has(name)) continue;
+          modules.set(name, { addr: mp, methodPointerCount: u32[(mp >>> 2) + 1], methodPointers: u32[(mp >>> 2) + 2] });
         }
-        out.code = { modulesAddr: arr, modulesCount: count2, regAddr: regs[0] || 0 };
-        if (out.modules.size > 1) { findInvokers(m, md, out, limit); return out; }
+        const code = { modulesAddr: arr, modulesCount: count2, regAddr: regs[0] || 0 };
+        if (modules.size > 1) { out.modules = modules; out.code = code; findAdjustorThunks(m, out, limit); findInvokers(m, md, out, limit); return out; }
+        if (!best || modules.size > best.modules.size) best = { modules, code };
       }
     }
   }
+  if (best) { out.modules = best.modules; out.code = best.code; findAdjustorThunks(m, out, limit); }
   return out;
+}
+
+/**
+ * v24.5 / v27.1+ code modules keep struct methods' adjustor thunks in their own table
+ * (adjustorThunkCount, adjustorThunks of { token, method }) right after methodPointers; before
+ * that, methodPointers itself holds the thunks for struct instance methods. Sets
+ * out.adjustorThunks = true/false (false: methodPointers are thunks).
+ */
+function findAdjustorThunks(m, out, limit) {
+  let seen = 0; let tables = 0;
+  for (const mod of out.modules.values()) {
+    const c = m.u32At(mod.addr + 12);
+    const p = m.u32At(mod.addr + 16);
+    if (!mod.methodPointerCount) continue;
+    seen++;
+    if (c > 0 && c <= mod.methodPointerCount && p > 0x400 && p < limit && (m.u32At(p) >>> 24) === 0x06 && (m.u32At(p + 8 * Math.min(c - 1, 4)) >>> 24) === 0x06) {
+      mod.adjustorThunks = { count: c, pointers: p };
+      tables++;
+    }
+  }
+  out.adjustorThunks = seen ? tables > 0 : null;
 }
 
 /**

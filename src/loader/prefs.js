@@ -3,6 +3,23 @@
 
 const KEY = 'bananaloader:prefs';
 
+const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+/** Stored prefs as prototype-free maps (a Banan or entry called "constructor" or "keys" is just a name). */
+function clean(raw) {
+  const out = Object.create(null);
+  if (!isObj(raw)) return out;
+  for (const id of Object.keys(raw)) {
+    if (!isObj(raw[id])) continue;
+    const c = (out[id] = Object.create(null));
+    for (const k of Object.keys(raw[id])) c[k] = raw[id][k];
+  }
+  return out;
+}
+function readStored() {
+  try { return clean(JSON.parse(localStorage.getItem(KEY) || '{}')); } catch (_) { return Object.create(null); }
+}
+const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+
 export class Entry {
   constructor(cat, id, def, name, o = {}) {
     this.category = cat;
@@ -14,24 +31,52 @@ export class Entry {
     this.max = o.max;
     this.step = o.step;
     this.options = o.options;      // string[] -> dropdown
-    this.kind = o.kind || (typeof def === 'boolean' ? 'bool' : typeof def === 'number' ? 'number' : 'string'); // 'key' | 'color' too
+    // 'key' | 'color' too; objects and arrays are kept as JSON (hidden prefs a Banan manages itself)
+    this.kind = o.kind || (typeof def === 'boolean' ? 'bool' : typeof def === 'number' ? 'number' : def && typeof def === 'object' ? 'json' : 'string');
     this.hidden = !!o.hidden;
     this._listeners = [];
-    const stored = cat.prefs._stored[cat.id] && cat.prefs._stored[cat.id][id];
-    this._value = stored !== undefined && typeof stored === typeof def ? stored : def;
+    const store = cat.prefs._stored[cat.id];
+    const stored = store && own(store, id) ? this._coerce(store[id]) : undefined;
+    this._value = stored !== undefined ? stored : this._coerce(def) ?? def;
+    if (this.kind === 'json') { try { this._json = JSON.stringify(this._value); } catch (_) { this._json = ''; } }
+  }
+
+  /** v as this entry's type (numbers clamped), or undefined when it can't be. */
+  _coerce(v) {
+    switch (this.kind) {
+      case 'number': {
+        if (v === null || v === undefined || v === '' || typeof v === 'boolean') return undefined;
+        let n = Number(v);
+        if (!Number.isFinite(n)) return undefined;
+        if (this.min != null) n = Math.max(this.min, n);
+        if (this.max != null) n = Math.min(this.max, n);
+        return n;
+      }
+      case 'bool': return typeof v === 'string' ? v === 'true' || v === '1' : !!v;
+      case 'json': return v && typeof v === 'object' && Array.isArray(v) === Array.isArray(this.default) ? v : undefined;
+      default: return v === null || v === undefined ? undefined : typeof v === 'object' ? undefined : String(v);
+    }
   }
 
   get value() { return this._value; }
   set value(v) { this.set(v); }
 
-  set(v, silent = false) {
-    if (this.kind === 'number') { v = Number(v); if (this.min != null) v = Math.max(this.min, v); if (this.max != null) v = Math.min(this.max, v); }
-    if (this.kind === 'bool') v = !!v;
+  set(v, silent = false) { this._apply(v, { silent, persist: true }); }
+
+  _apply(v, { silent = false, persist = true } = {}) {
+    const c = this._coerce(v);
+    if (c === undefined) return; // not a valid value for this entry: keep the current one
     const old = this._value;
-    if (old === v) return;
-    this._value = v;
-    this.category.prefs._dirty();
-    if (!silent) for (const fn of this._listeners) { try { fn(v, old); } catch (e) { console.error('[BananaLoader] pref listener', e); } }
+    if (this.kind === 'json') {
+      // objects can be changed in place and set again, so compare their contents
+      let j;
+      try { j = JSON.stringify(c); } catch (_) { return; }
+      if (j === this._json) return;
+      this._json = j;
+    } else if (old === c) return;
+    this._value = c;
+    if (persist) this.category.prefs._dirty();
+    if (!silent) for (const fn of this._listeners) { try { fn(c, old); } catch (e) { console.error('[BananaLoader] pref listener', e); } }
     this.category.prefs.emit('change', this);
   }
 
@@ -68,7 +113,7 @@ export class Preferences {
   constructor() {
     this.categories = new Map();
     this._ev = {};
-    try { this._stored = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (_) { this._stored = {}; }
+    this._stored = readStored();
     this._t = null;
   }
 
@@ -85,6 +130,15 @@ export class Preferences {
 
   getCategory(id) { return this.categories.get(id); }
 
+  /** Move stored values to a new category id (a Banan whose id changed keeps its settings). */
+  renameCategory(from, to) {
+    if (from === to) return;
+    if (own(this._stored, from) && !own(this._stored, to)) { this._stored[to] = this._stored[from]; delete this._stored[from]; }
+    const c = this.categories.get(from);
+    if (c && !this.categories.has(to)) { this.categories.delete(from); c.id = to; this.categories.set(to, c); }
+    this._write();
+  }
+
   removeOwner(owner) {
     for (const [id, c] of this.categories) if (c.owner === owner) this.categories.delete(id);
     this.emit('layout');
@@ -95,22 +149,27 @@ export class Preferences {
     this._t = setTimeout(() => this.save(), 400);
   }
 
-  save() {
-    clearTimeout(this._t);
-    for (const [id, c] of this.categories) {
-      const o = (this._stored[id] ||= {});
-      for (const [eid, e] of c.entries) o[eid] = e.value;
-    }
+  _write() {
     try { localStorage.setItem(KEY, JSON.stringify(this._stored)); } catch (_) { /* ignore */ }
-    this.emit('saved');
   }
 
-  /** Re-read values from storage (e.g. after editing them elsewhere). */
+  /** Write every value to storage. silent: without the onPreferencesSaved event. */
+  save(silent = false) {
+    clearTimeout(this._t);
+    for (const [id, c] of this.categories) {
+      const o = own(this._stored, id) ? this._stored[id] : (this._stored[id] = Object.create(null));
+      for (const [eid, e] of c.entries) o[eid] = e.value;
+    }
+    this._write();
+    if (!silent) this.emit('saved');
+  }
+
+  /** Re-read values from storage (e.g. after editing them elsewhere). Doesn't write anything back. */
   load() {
-    try { this._stored = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (_) { return; }
-    for (const [id, c] of this.categories) for (const [eid, e] of c.entries) {
-      const v = this._stored[id] && this._stored[id][eid];
-      if (v !== undefined) e.set(v);
+    this._stored = readStored();
+    for (const [id, c] of this.categories) {
+      const store = own(this._stored, id) ? this._stored[id] : null;
+      for (const [eid, e] of c.entries) if (store && own(store, eid)) e._apply(store[eid], { persist: false });
     }
     this.emit('loaded');
   }

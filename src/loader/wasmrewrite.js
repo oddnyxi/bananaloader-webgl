@@ -66,7 +66,10 @@ export function slotMap(bytes, secs) {
       if (r.u8() !== 0x0b) throw new Error('bad element offset');
     };
     if (flags === 0) { readOffset(); const cnt = r.leb(); for (let k = 0; k < cnt; k++) { const f = r.leb(); if (offset >= 0) map.set(offset + k, f); } }
-    else if (flags === 2) { r.leb(); readOffset(); r.u8(); const cnt = r.leb(); for (let k = 0; k < cnt; k++) { const f = r.leb(); if (offset >= 0) map.set(offset + k, f); } }
+    else if (flags === 2) {
+      const table = r.leb(); readOffset(); r.u8(); const cnt = r.leb();
+      for (let k = 0; k < cnt; k++) { const f = r.leb(); if (offset >= 0 && table === 0) map.set(offset + k, f); } // only table 0 is the one call_indirect uses
+    }
     else if (flags === 1 || flags === 3) { r.u8(); const cnt = r.leb(); for (let k = 0; k < cnt; k++) r.leb(); }
     else throw new Error(`element segment flags ${flags} not supported`);
   }
@@ -96,6 +99,7 @@ function funcTypes(bytes, secs) {
       else if (kind === 2) { const fl = r.leb(); r.leb(); if (fl & 1) r.leb(); }
       else if (kind === 3) { r.u8(); r.u8(); }
       else if (kind === 4) { r.u8(); r.leb(); }
+      else throw new Error(`import kind ${kind} not supported`);
     }
   }
   const fs = secs.find((s) => s.id === 3);
@@ -108,21 +112,40 @@ function funcTypes(bytes, secs) {
 }
 
 /**
- * Rewrite direct calls to the functions behind `slots` (table indices).
- * @returns {{ bytes: Uint8Array, rewritten: number, sites: number, skipped: number, missing: number[] }}
+ * Rewrite direct calls to the functions behind `slots` (table indices), or behind every slot
+ * of the table when `slots` is 'all'.
+ * Identical functions are merged by the compiler, so one function often sits in several slots
+ * (one per method that compiled to it). Its direct calls go through one of them, its "via" slot:
+ * the first of `slots` that holds it.
+ * @returns {{ bytes: Uint8Array, rewritten: number, sites: number, skipped: number, missing: number[],
+ *   slotVia: Int32Array|null, shared: Uint8Array|null }}
+ *   slotVia[slot]: the slot direct calls to that slot's function now go through (-1: not rewritten);
+ *   shared[slot]: 1 when that slot's function is also in other slots (merged identical methods).
  */
 export function rewriteDirectCalls(bytes, slots) {
   const secs = sections(bytes);
   const smap = slotMap(bytes, secs);
   const { types, imported } = funcTypes(bytes, secs);
-  const targets = new Map(); // funcIndex -> { slot, type }
+  const all = slots === 'all';
+  const via = new Int32Array(types.length).fill(-1); // funcIndex -> slot its direct calls go through
+  const slotCount = new Uint16Array(types.length);
   const missing = [];
-  for (const slot of slots) {
+  let maxSlot = 0;
+  for (const [k, f] of smap) { if (k > maxSlot) maxSlot = k; if (f < slotCount.length && slotCount[f] < 65535) slotCount[f]++; }
+  let targets = 0;
+  for (const slot of all ? smap.keys() : slots) {
     const f = smap.get(slot);
-    if (f === undefined || f < imported) { missing.push(slot); continue; }
-    targets.set(f, { slot, type: types[f] });
+    if (f === undefined || f < imported || f >= types.length) { missing.push(slot); continue; }
+    if (via[f] < 0) { via[f] = slot; targets++; }
   }
-  if (!targets.size) return { bytes, rewritten: 0, sites: 0, skipped: 0, missing };
+  if (!targets) return { bytes, rewritten: 0, sites: 0, skipped: 0, missing, slotVia: null, shared: null };
+  const slotVia = new Int32Array(maxSlot + 1).fill(-1);
+  const shared = new Uint8Array(maxSlot + 1);
+  for (const [slot, f] of smap) {
+    if (f >= types.length) continue;
+    if (via[f] >= 0) slotVia[slot] = via[f];
+    if (slotCount[f] > 1) shared[slot] = 1;
+  }
 
   const code = secs.find((s) => s.id === 10);
   const r = new Reader(bytes, code.start);
@@ -141,7 +164,7 @@ export function rewriteDirectCalls(bytes, slots) {
     const size = r.leb();
     const bodyStart = r.p;
     const bodyEnd = bodyStart + size;
-    const edits = scanBody(bytes, bodyStart, bodyEnd, targets);
+    const edits = scanBody(bytes, bodyStart, bodyEnd, via);
     if (edits === null) skipped++;
     if (!edits || !edits.length) {
       push(bytes.subarray(sizeStart, bodyEnd));
@@ -153,11 +176,10 @@ export function rewriteDirectCalls(bytes, slots) {
       for (const e of edits) {
         const a = bytes.subarray(cur, e.at);
         chunks.push(a); len += a.length;
-        const t = targets.get(e.func);
         const rep = [0x41];
-        sleb(t.slot, rep);
-        rep.push(0x11);
-        uleb(t.type, rep);
+        sleb(via[e.func], rep);
+        rep.push(e.tail ? 0x13 : 0x11); // return_call -> return_call_indirect
+        uleb(types[e.func], rep);
         rep.push(0x00);
         const ru = new Uint8Array(rep);
         chunks.push(ru); len += ru.length;
@@ -183,13 +205,13 @@ export function rewriteDirectCalls(bytes, slots) {
   out.set(secHead, o); o += secHead.length;
   for (const p of parts) { out.set(p, o); o += p.length; }
   out.set(after, o);
-  return { bytes: out, rewritten, sites, skipped, missing };
+  return { bytes: out, rewritten, sites, skipped, missing, slotVia, shared };
 }
 
 const BLOCK_TYPES = new Set([0x40, 0x7f, 0x7e, 0x7d, 0x7c, 0x7b, 0x70, 0x6f]);
 
-/** Return [{ at, end, func }] for direct calls to targets, [] if none, or null if the body can't be decoded. */
-function scanBody(b, p, end, targets) {
+/** Return [{ at, end, func, tail? }] for direct calls to targets, [] if none, or null if the body can't be decoded. */
+function scanBody(b, p, end, via) {
   // locals
   let n = 0, s = 0, x;
   do { x = b[p++]; n |= (x & 0x7f) << s; s += 7; } while (x & 0x80);
@@ -197,34 +219,41 @@ function scanBody(b, p, end, targets) {
   let edits = null;
   const leb = () => { let r = 0, sh = 0, y; do { y = b[p++]; r |= (y & 0x7f) << sh; sh += 7; } while (y & 0x80); return r >>> 0; };
   const skip = () => { while (b[p++] & 0x80); };
+  const blockType = () => { if (BLOCK_TYPES.has(b[p])) p++; else if (b[p] === 0x63 || b[p] === 0x64) { p++; skip(); } else skip(); };
   while (p < end) {
     const at = p;
     const op = b[p++];
-    if (op === 0x10) {
+    if (op === 0x10 || op === 0x12) { // call / return_call
       const f = leb();
-      if (targets.has(f)) (edits ||= []).push({ at, end: p, func: f });
+      if (f < via.length && via[f] >= 0) (edits ||= []).push({ at, end: p, func: f, tail: op === 0x12 });
       continue;
     }
     if (op >= 0x20 && op <= 0x26) { skip(); continue; }          // local/global/table get/set
     if (op >= 0x28 && op <= 0x3e) { skip(); skip(); continue; }  // loads/stores: memarg
     if (op >= 0x45 && op <= 0xc4) continue;                      // numeric
     switch (op) {
-      case 0x00: case 0x01: case 0x05: case 0x0b: case 0x0f: case 0x1a: case 0x1b: case 0xd1: case 0x19:
+      case 0x00: case 0x01: case 0x05: case 0x0a: case 0x0b: case 0x0f: case 0x1a: case 0x1b: case 0xd1: case 0xd3: case 0xd4: case 0x19:
         break;
       case 0x02: case 0x03: case 0x04: case 0x06:
-        if (BLOCK_TYPES.has(b[p])) p++; else skip();
+        blockType();
         break;
-      case 0x0c: case 0x0d: case 0x12: case 0xd2: case 0x07: case 0x08: case 0x09: case 0x18:
+      case 0x0c: case 0x0d: case 0xd2: case 0x07: case 0x08: case 0x09: case 0x18: case 0x14: case 0x15: case 0xd5: case 0xd6:
         skip();
         break;
       case 0x0e: { const c = leb(); for (let i = 0; i <= c; i++) skip(); break; }
       case 0x11: case 0x13: skip(); skip(); break;
-      case 0x1c: { const c = leb(); p += c; break; }
+      case 0x1c: { const c = leb(); for (let i = 0; i < c; i++) { if (b[p] === 0x63 || b[p] === 0x64) { p++; skip(); } else p++; } break; }
+      case 0x1f: { // try_table: blocktype, vec(catch clause)
+        blockType();
+        const c = leb();
+        for (let i = 0; i < c; i++) { const kind = b[p++]; if (kind === 0 || kind === 1) skip(); skip(); }
+        break;
+      }
       case 0x3f: case 0x40: p++; break;
       case 0x41: case 0x42: skip(); break;
       case 0x43: p += 4; break;
       case 0x44: p += 8; break;
-      case 0xd0: p++; break;
+      case 0xd0: if (b[p] === 0x63 || b[p] === 0x64) { p++; skip(); } else skip(); break;
       case 0xfc: {
         const sub = leb();
         if (sub <= 7) break;
@@ -235,6 +264,14 @@ function scanBody(b, p, end, targets) {
         if (sub === 12 || sub === 14) { skip(); skip(); break; }
         return null;
       }
+      case 0xfd: { // SIMD
+        const sub = leb();
+        if (sub <= 11 || sub === 92 || sub === 93) { skip(); skip(); break; }      // memarg
+        if (sub === 12 || sub === 13) { p += 16; break; }                          // v128.const, i8x16.shuffle
+        if (sub >= 21 && sub <= 34) { p += 1; break; }                             // extract/replace lane
+        if (sub >= 84 && sub <= 91) { skip(); skip(); p += 1; break; }             // load/store lane
+        break;                                                                     // everything else has no immediates
+      }
       case 0xfe: {
         const sub = leb();
         if (sub === 0x03) { p++; break; }
@@ -242,7 +279,7 @@ function scanBody(b, p, end, targets) {
         break;
       }
       default:
-        return null; // SIMD or something unknown: leave this function as it is
+        return null; // GC or something unknown: leave this function as it is
     }
   }
   return edits || [];

@@ -17,10 +17,14 @@ import { fetchGameWasm } from '../dumper/live.js';
 
 export { Bootstrap, fmtBytes, fmtMs, findModuleInPage };
 
+let ours = null; // next to an incompatible bootstrap (an older tool owns window.__unityBootstrap) we keep our own
+
 export function getBootstrap() {
   const existing = window.__unityBootstrap;
   if (existing && existing.protocol === PROTOCOL && typeof existing.client === 'function') return existing;
+  if (ours) return ours;
   const boot = new Bootstrap();
+  ours = boot;
   if (!existing) {
     try { Object.defineProperty(window, '__unityBootstrap', { value: boot, configurable: true, writable: false, enumerable: false }); } catch (_) { window.__unityBootstrap = boot; }
   }
@@ -62,18 +66,26 @@ export async function prepareIl2Cpp(boot, step) {
 async function refetchAnalysis(boot) {
   if (boot._refetch) return boot._refetch;
   boot._refetch = (async () => {
-    const got = await fetchGameWasm((m) => boot.log(m, 'net'));
-    if (!got) { boot.log('could not fetch the game\'s wasm again', 'warn'); return null; }
-    const t = performance.now();
-    const w = new WasmModule(got.bytes);
-    const fnTables = w.fnTables();
-    const signatures = w.slotSignatures();
-    const ms = performance.now() - t;
-    boot.wasmBytes = got.bytes;
-    const a = { fnTables, signatures, functions: w.funcCount, types: w.types.length, ms, summary: `${w.funcCount.toLocaleString()} functions · ${fnTables ? fnTables.size + ' per-signature function tables (fastcomp)' : 'direct function pointers'} · ${signatures.count.toLocaleString()} table slots (re-fetched) · ${fmtMs(ms)}` };
-    boot.setAnalysis(a);
-    boot.log(`Analysed wasm (re-fetched): ${a.summary}`);
-    return a;
+    try {
+      const got = await fetchGameWasm((m) => boot.log(m, 'net'));
+      if (!got) { boot.log('could not fetch the game\'s wasm again', 'warn'); return null; }
+      const t = performance.now();
+      const w = new WasmModule(got.bytes);
+      // fastcomp places its table at an imported tableBase: use the live value when the bootstrap saw it
+      w.globalValues = (boot.state.wasm && boot.state.wasm.liveGlobals) || {};
+      const fnTables = w.fnTables();
+      const signatures = w.slotSignatures();
+      const ms = performance.now() - t;
+      boot.wasmBytes = got.bytes;
+      const a = { fnTables, signatures, functions: w.funcCount, types: w.types.length, ms, summary: `${w.funcCount.toLocaleString()} functions · ${fnTables ? fnTables.size + ' per-signature function tables (fastcomp)' : 'direct function pointers'} · ${signatures.count.toLocaleString()} table slots (re-fetched) · ${fmtMs(ms)}` };
+      boot.setAnalysis(a);
+      boot.log(`Analysed wasm (re-fetched): ${a.summary}`);
+      return a;
+    } catch (e) {
+      // carry on without function tables (calls on fastcomp need them; everything else works)
+      boot.log(`could not analyse the re-fetched wasm: ${e && e.message || e}`, 'warn');
+      return null;
+    }
   })();
   return boot._refetch;
 }

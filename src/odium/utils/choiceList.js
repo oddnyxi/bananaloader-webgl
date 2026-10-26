@@ -32,7 +32,7 @@ export const choiceList = (opts, multi, sel, cls, onPick) => {
   return {
     node: root,
     get: () => (multi ? options.filter((o) => chosen.has(o)) : [...chosen][0]),
-    set: (v) => { chosen = new Set(Array.isArray(v) ? v : v == null ? [] : [v]); draw(); },
+    set: (v) => { const a = Array.isArray(v) ? v : v == null ? [] : [v]; chosen = new Set(multi ? a : a.slice(0, 1)); draw(); },
     setOptions: (a) => { options = a.slice(); chosen = new Set([...chosen].filter((x) => options.includes(x))); draw(); },
   };
 };

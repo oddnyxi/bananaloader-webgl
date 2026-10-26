@@ -138,7 +138,9 @@ export class UnityApi {
       } catch (_) { /* next */ }
     }
     const k = il.ensureClass(td);
-    return k ? il.findInstances(k, { validate: (a) => this.verified(a) }) : [];
+    // heap scan: this class and everything derived from it (find('UnityEngine.Collider') finds BoxColliders)
+    const klasses = il.subKlasses(td, [k]);
+    return klasses.size ? il.findInstances(k, { validate: (a) => this.verified(a), klasses }) : [];
   }
 
   /**
@@ -147,38 +149,52 @@ export class UnityApi {
    * Node = { go, tr, name, active, activeInHierarchy, children: Node[], parent, scene, hidden }
    */
   hierarchy() {
-    const { list, source } = this.allGameObjects();
+    const { list: found, source } = this.allGameObjects();
+    // builds that can only list active objects would drop the ones turned off here; keep them
+    let list = found;
+    if (this._kept && this._kept.size) {
+      const seen = new Set(found);
+      const extra = [...this._kept].filter((go) => !seen.has(go) && this.alive(go));
+      if (extra.length) list = found.concat(extra);
+    }
     const byTr = new Map();
     const byGo = new Map();
     const nodes = [];
+    // builds that stripped GameObject.get_transform: pair each Transform (found the same way) with its GameObject
+    let trOf = null;
+    if (!this.has('transform') && this.td.Transform >= 0) {
+      trOf = new Map();
+      try { for (const t of this.objectsOfType(this.td.Transform)) { const g = this.try('gameObject', t); if (g) trOf.set(g >>> 0, t); } } catch (_) { /* none */ }
+      this._trOf = trOf; // components() falls back to it on the same builds
+    }
     for (const go of list) {
       if (!this.alive(go)) continue;
-      const tr = this.try('transform', go);
-      if (!tr) continue;
+      const tr = trOf ? trOf.get(go >>> 0) || 0 : this.try('transform', go);
+      if (!tr && !trOf) continue;
       const n = {
         go, tr,
         name: this.name(go) ?? '?',
-        active: this.try('activeSelf', go) ?? true,
+        active: this.isActive(go) ?? true,
         activeInHierarchy: this.try('activeInHierarchy', go),
         hideFlags: this.try('hideFlags', go) ?? 0,
         children: [],
         parent: null,
         scene: undefined,
       };
-      byTr.set(tr, n);
+      if (tr) byTr.set(tr, n);
       byGo.set(go, n);
       nodes.push(n);
     }
     const roots = [];
     for (const n of nodes) {
-      const p = this.try('parent', n.tr);
+      const p = n.tr ? this.try('parent', n.tr) : null;
       const pn = p ? byTr.get(p) : null;
       if (pn) { n.parent = pn; pn.children.push(n); } else roots.push(n);
     }
     // sibling order
     const order = (arr) => {
       if (this.has('siblingIndex')) {
-        for (const n of arr) n._si = this.try('siblingIndex', n.tr) ?? 0;
+        for (const n of arr) n._si = (n.tr && this.try('siblingIndex', n.tr)) ?? 0;
         arr.sort((a, b) => a._si - b._si);
       }
       arr.forEach((n) => order(n.children));
@@ -222,14 +238,129 @@ export class UnityApi {
       const a = il.arrayInfo(arr);
       const out = [];
       for (let i = 0; i < a.length; i++) out.push(il.mem.u32At(a.data + i * 4));
-      return out;
+      if (out.length) return out; // a GameObject always has a Transform: an empty list means the call didn't work
     }
     // fallback: at least the transform
-    const tr = this.try('transform', go);
+    const tr = this.try('transform', go) || (this._trOf && this._trOf.get(go >>> 0)) || 0;
     return tr ? [tr] : [];
   }
 
-  setActive(go, v) { return this.call('setActive', go, !!v); }
+  /**
+   * Active state for display. Uses get_activeSelf when the build has it, else what we last set,
+   * else activeInHierarchy; null when nothing can tell.
+   */
+  isActive(go) {
+    if (this._soft && this._soft.has(go)) return false;
+    const v = this.try('activeSelf', go);
+    if (v !== undefined && v !== null) return !!v;
+    if (this._state && this._state.has(go)) return this._state.get(go);
+    const hi = this.try('activeInHierarchy', go);
+    return hi === undefined || hi === null ? null : !!hi;
+  }
+
+  /**
+   * Turn a GameObject on or off. Returns { mode, count? }:
+   *   'native' — GameObject.SetActive (or the old `active` setter)
+   *   'soft'   — the build has no SetActive (Unity strips it when the game never calls it), so the
+   *              Renderers, Colliders and Behaviours on the object and its children were disabled
+   *              instead (restored exactly when it's turned back on)
+   * Throws with a readable reason when neither is possible, or when Unity didn't apply it.
+   */
+  setActive(go, v) {
+    v = !!v;
+    if (v && this._soft && this._soft.has(go)) return this._softRestore(go);
+    const key = this.has('setActive') ? 'setActive' : this.has('setActiveObsolete') ? 'setActiveObsolete' : null;
+    if (key) {
+      // remember the subtree so the scene tree can still show it once it's inactive
+      if (!v) { const kept = (this._kept ||= new Set()); for (const g of this._subtree(go)) kept.add(g); }
+      this.call(key, go, v);
+      (this._state ||= new Map()).set(go, v);
+      const now = this.try('activeSelf', go);
+      if (now !== undefined && now !== null && !!now !== v) {
+        throw new Error(`Unity kept "${this.name(go) ?? 'the object'}" ${now ? 'active' : 'inactive'}: the game changed it back right away`);
+      }
+      return { mode: 'native' };
+    }
+    if (!v) return this._softDisable(go);
+    return { mode: 'none' }; // nothing of ours to turn back on
+  }
+
+  /** The GameObject and every descendant, via Transform children or the scene tree. */
+  _subtree(go) {
+    const out = new Set([go]);
+    const tr = this.try('transform', go);
+    if (tr && this.has('childCount') && this.has('child') && this.has('gameObject')) {
+      const walk = (t, d) => {
+        const n = this.try('childCount', t) || 0;
+        for (let i = 0; i < n && d < 64; i++) {
+          const c = this.try('child', t, i);
+          if (!c) continue;
+          const g = this.try('gameObject', c);
+          if (g) out.add(g);
+          walk(c, d + 1);
+        }
+      };
+      walk(tr, 0);
+      return out;
+    }
+    try {
+      const { byGo } = this.hierarchy();
+      const n = byGo.get(go);
+      const walk = (x) => { for (const c of x.children) { out.add(c.go); walk(c); } };
+      if (n) walk(n);
+    } catch (_) { /* just the object itself */ }
+    return out;
+  }
+
+  _softDisable(go) {
+    const il = this.il;
+    const gos = this._subtree(go);
+    const entries = [];
+    const kinds = [
+      ['UnityEngine.Renderer', 'rendererSet', 'rendererGet'],
+      ['UnityEngine.Collider', 'colliderSet', 'colliderGet'],
+      ['UnityEngine.Behaviour', 'behaviourSet', 'behaviourGet'],
+    ];
+    let comps = null;
+    const compsOf = () => {
+      if (comps) return comps;
+      comps = [];
+      if (this.has('componentsInternal') || this.has('getComponents')) for (const g of gos) comps.push(...this.components(g));
+      return comps;
+    };
+    let setters = 0;
+    for (const [type, set, get] of kinds) {
+      if (!this.has(set)) continue;
+      setters++;
+      const td = il.findType(type);
+      if (td < 0) continue;
+      let list = compsOf().filter((c) => il.isInstanceOf(c, td));
+      if (!list.length && this.has('gameObject')) {
+        // no GetComponents: find every component of the type and keep the ones in this subtree
+        try { list = this.objectsOfType(td).filter((c) => gos.has(this.try('gameObject', c))); } catch (_) { list = []; }
+      }
+      for (const c of list) {
+        if (entries.some((e) => e.c === c)) continue;
+        if (this.has(get) && this.try(get, c) === false) continue; // already off: leave it off on restore
+        try { this.call(set, c, false); entries.push({ c, set }); } catch (_) { /* skip this one */ }
+      }
+    }
+    if (!entries.length) {
+      const what = `"${this.name(go) ?? 'this object'}"`;
+      throw new Error(!setters
+        ? `Can't turn ${what} off in this build: Unity stripped GameObject.SetActive (the game never calls it), and Renderer, Collider and Behaviour.enabled too`
+        : `Can't turn ${what} off in this build: Unity stripped GameObject.SetActive (the game never calls it), and no enabled renderer, collider or behaviour could be found on it${this.has('gameObject') || this.has('componentsInternal') || this.has('getComponents') ? '' : ' (GetComponents and Component.gameObject are stripped too)'}`);
+    }
+    (this._soft ||= new Map()).set(go, entries);
+    return { mode: 'soft', count: entries.length };
+  }
+
+  _softRestore(go) {
+    const entries = this._soft.get(go) || [];
+    this._soft.delete(go);
+    for (const { c, set } of entries) { try { if (this.alive(c)) this.call(set, c, true); } catch (_) { /* gone */ } }
+    return { mode: 'soft', count: entries.length };
+  }
   destroy(obj) { return this.call('destroy', 0, obj); }
   setName(obj, name) { return this.call('setName', obj, name); }
   gameObjectOf(comp) { return this.try('gameObject', comp); }
@@ -249,6 +380,13 @@ UnityApi.CANDIDATES = {
   activeSelf: [['UnityEngine.GameObject', 'get_activeSelf', 0]],
   activeInHierarchy: [['UnityEngine.GameObject', 'get_activeInHierarchy', 0]],
   setActive: [['UnityEngine.GameObject', 'SetActive', 1]],
+  setActiveObsolete: [['UnityEngine.GameObject', 'set_active', 1]],
+  rendererSet: [['UnityEngine.Renderer', 'set_enabled', 1]],
+  rendererGet: [['UnityEngine.Renderer', 'get_enabled', 0]],
+  colliderSet: [['UnityEngine.Collider', 'set_enabled', 1]],
+  colliderGet: [['UnityEngine.Collider', 'get_enabled', 0]],
+  behaviourSet: [['UnityEngine.Behaviour', 'set_enabled', 1]],
+  behaviourGet: [['UnityEngine.Behaviour', 'get_enabled', 0]],
   scene: [['UnityEngine.GameObject', 'get_scene', 0]],
   sceneName: [['UnityEngine.SceneManagement.Scene', 'get_name', 0]],
   sceneNameInternal: [['UnityEngine.SceneManagement.Scene', 'GetNameInternal', 1]],

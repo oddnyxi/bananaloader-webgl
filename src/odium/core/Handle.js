@@ -13,6 +13,7 @@ export class Handle {
     this._cm = null;
     this._hk = null;
     this._key = null;
+    track(ui, this);
   }
 
   setVisible(v) { this.el.style.display = v ? '' : 'none'; return this; }
@@ -73,8 +74,9 @@ export class Handle {
 
   setHotkey(spec) {
     if (this._hk) this.ui.unbindKey(this._hk);
+    // tabs and groups have no click behaviour of their own: they say what their hotkey does
     this._hk = spec
-      ? this.ui.bindKey(spec, () => { if (!this.el.classList.contains('disabled')) this.el.click(); })
+      ? this.ui.bindKey(spec, () => { if (this.el.classList.contains('disabled')) return; if (this._hotkeyAction) this._hotkeyAction(); else this.el.click(); })
       : null;
     return this;
   }
@@ -100,9 +102,32 @@ export class Handle {
     return this;
   }
 
+  /** Run fn when this control is destroyed (keybinds release their onPress binding with it). */
+  _onDestroy(fn) { (this._cleanup ||= []).push(fn); return this; }
+
+  /** Unregister without touching the DOM: hotkeys, config key, cleanup hooks. */
+  _release() {
+    if (this._hk) { this.ui.unbindKey(this._hk); this._hk = null; }
+    if (this._key && this.ui.reg.get(this._key) === this) this.ui.reg.delete(this._key);
+    this._key = null;
+    for (const f of this._cleanup || []) safe(f);
+    this._cleanup = null;
+    if (this.ui._handles) this.ui._handles.delete(this);
+  }
+
   destroy() {
-    if (this._hk) this.ui.unbindKey(this._hk);
-    if (this._key) this.ui.reg.delete(this._key);
+    this._release();
     this.el.remove();
   }
+}
+
+/** Every handle the UI made, so destroying a tab can release the controls inside it. */
+export function track(ui, h) {
+  if (!ui) return;
+  (ui._handles ||= new Set()).add(h);
+}
+
+/** Release every control whose element sits inside `node` (call before removing node). */
+export function releaseInside(ui, node) {
+  for (const h of [...(ui._handles || [])]) if (h.el !== node && node.contains(h.el)) h._release();
 }

@@ -14,7 +14,11 @@ export function createButton(text, action, o = {}) {
     const r = safe(action);
     if (r && typeof r.then === 'function') {
       c.setLoading(true);
-      r.then(() => c.setLoading(false), () => c.setLoading(false));
+      r.then(() => c.setLoading(false), (e) => {
+        c.setLoading(false);
+        console.error('[OdiumUI]', e);
+        if (this.ui.notify) this.ui.notify(`${text} failed: ${(e && e.message) || e}`, 'error');
+      });
     }
   };
 

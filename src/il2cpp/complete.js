@@ -144,6 +144,15 @@ export function chainBefore(toks, end) {
   return null;
 }
 
+const TYPE_ALIAS = { int: 'System.Int32', uint: 'System.UInt32', long: 'System.Int64', ulong: 'System.UInt64', short: 'System.Int16', ushort: 'System.UInt16', byte: 'System.Byte', sbyte: 'System.SByte', float: 'System.Single', double: 'System.Double', bool: 'System.Boolean', char: 'System.Char', string: 'System.String', object: 'System.Object' };
+
+/** Same parameter types (an override, or a re-declaration hiding the base one)? */
+function sameParams(il, a, b) {
+  if (a.parameterCount !== b.parameterCount) return false;
+  const pa = il.params(a); const pb = il.params(b);
+  return pa.every((p, i) => il.typeName(p.type, true) === il.typeName(pb[i].type, true));
+}
+
 const strArg = (args, n = 0) => {
   const a = args && args[n];
   return a && a.length === 1 && a[0].t === 'str' ? a[0].v : null;
@@ -182,7 +191,8 @@ export class Completer {
       case T.STRING: return { prim: 'string', name: 'string' };
       case T.BOOLEAN: return { prim: 'bool', name: 'bool' };
       case T.VOID: return { prim: 'void', name: 'void' };
-      case T.CHAR: case T.I1: case T.U1: case T.I2: case T.U2: case T.I4: case T.U4: case T.I8: case T.U8:
+      case T.I8: case T.U8: return { prim: 'bigint', name: PRIM_NAME[t.kind] }; // long/ulong arrive as BigInts
+      case T.CHAR: case T.I1: case T.U1: case T.I2: case T.U2: case T.I4: case T.U4:
       case T.R4: case T.R8: case T.I: case T.U: case T.PTR: case T.FNPTR:
         return { prim: 'number', name: PRIM_NAME[t.kind] || 'nint' };
       case T.OBJECT: { const td = this.tdOf('System.Object'); return td >= 0 ? { td } : null; }
@@ -216,12 +226,17 @@ export class Completer {
   parseTypeName(s, depth = 0) {
     s = String(s).trim();
     if (!s || depth > 8) return null;
-    const PRIM = { int: 'System.Int32', uint: 'System.UInt32', long: 'System.Int64', ulong: 'System.UInt64', short: 'System.Int16', ushort: 'System.UInt16', byte: 'System.Byte', sbyte: 'System.SByte', float: 'System.Single', double: 'System.Double', bool: 'System.Boolean', char: 'System.Char', string: 'System.String', object: 'System.Object' };
+    const PRIM = TYPE_ALIAS;
     if (s === 'string' || s === 'System.String') return { prim: 'string', name: 'string' };
     if (s.endsWith('[]')) { const e = this.parseTypeName(s.slice(0, -2), depth + 1); return e ? { array: e } : null; }
     if (PRIM[s]) s = PRIM[s];
+    // values of these types arrive as JS numbers / booleans / BigInts, like toRef() types them
+    if (/^System\.(Int32|UInt32|Int16|UInt16|Byte|SByte|Single|Double|Char|IntPtr|UIntPtr)$/.test(s)) return { prim: 'number', name: s.slice(7) };
+    if (/^System\.(Int64|UInt64)$/.test(s)) return { prim: 'bigint', name: s.slice(7) };
+    if (s === 'System.Boolean') return { prim: 'bool', name: 'bool' };
     const lt = s.indexOf('<');
     if (lt < 0) { const td = this.tdOf(s); return td >= 0 ? { td } : null; }
+    if (s.lastIndexOf('>') < lt) return null; // unbalanced: Il2Cpp.type() rejects it too
     const base = s.slice(0, lt);
     const inner = s.slice(lt + 1, s.lastIndexOf('>'));
     const parts = [];
@@ -300,7 +315,11 @@ export class Completer {
         }
         const cur = out.get(m.name);
         if (cur && cur.kind !== 'method') continue;
-        if (cur) { cur.metas.push(m); cur.levels.push(lv); continue; }
+        if (cur) {
+          // an override of a method already listed from a derived type isn't another overload
+          if (cur.metas.some((x) => sameParams(il, x, m))) continue;
+          cur.metas.push(m); cur.levels.push(lv); continue;
+        }
         out.set(m.name, { kind: 'method', name: m.name, isStatic: st, metas: [m], levels: [lv], owner: lv, pub: (m.flags & METHOD.ACCESS) === METHOD.PUBLIC });
       }
       if (wantStatic) break; // statics are reachable through the derived type, but listing the type's own reads better
@@ -384,7 +403,7 @@ export class Completer {
         if (isNew && s.k === 'static') s = { k: 'inst', ref: s.ref };
         else s = this.call(s, seg.call);
         isNew = false;
-      } else if (seg.index) s = this.elementOf(s);
+      } else if (seg.index) s = this.elementOf(s, !!seg.iter);
       else s = null;
     }
     return s;
@@ -442,7 +461,7 @@ export class Completer {
       case 'static': {
         if (name === '$type') return { k: 'inst', ref: { td: this.tdOf('System.Type') } };
         if (name === '$new' || name === '$find') return { k: 'fnret', ref: s.ref };
-        if (name === '$findAll') return { k: 'fnret', ref: { array: s.ref } };
+        if (name === '$findAll') return { k: 'fnret', ref: { array: s.ref, js: true } };
         if (name === '$name') return { k: 'inst', ref: { prim: 'string', name: 'string' } };
         const m = this.members(s.ref, true).get(name);
         if (!m) return null;
@@ -455,13 +474,15 @@ export class Completer {
         if (!r) return null;
         if (r.prim === 'string') return protoMember(String.prototype, name, 'string');
         if (r.prim === 'number') return protoMember(Number.prototype, name);
+        if (r.prim === 'bigint') return protoMember(BigInt.prototype, name);
         if (r.prim) return null;
         if (r.array) {
           if (name === 'length') return { k: 'js', v: 0 };
-          if (name === '$toArray' || name === 'toArray') return { k: 'fnret', ref: r, jsArray: true };
+          // a managed array proxy has $toArray(); a plain JS array (findAll, gameObjects, $toArray()) doesn't
+          if (!r.js && (name === '$toArray' || name === 'toArray')) return { k: 'fnret', ref: { array: r.array, js: true } };
           if (/^\d+$/.test(name)) return { k: 'inst', ref: r.array };
-          if (['find', 'at', 'pop', 'shift'].includes(name)) return { k: 'fnret', ref: r.array };
-          if (['filter', 'slice', 'reverse', 'sort', 'concat'].includes(name)) return { k: 'fnret', ref: r };
+          if (['find', 'at', 'pop', 'shift', 'findLast'].includes(name)) return { k: 'fnret', ref: r.array };
+          if (['filter', 'slice', 'reverse', 'sort', 'concat', 'toReversed', 'toSorted'].includes(name)) return { k: 'fnret', ref: { array: r.array, js: true } };
           return null;
         }
         if (r.gp || r.td === undefined) return null;
@@ -469,7 +490,7 @@ export class Completer {
         if (d.isEnum) return protoMember(Number.prototype, name);
         if (name === '$static') return { k: 'static', ref: r };
         if (name === '$component') return { k: 'apifn', name: 'find' };
-        if (name === '$toArray') return { k: 'fnret', ref: { array: { td: this.tdOf('System.Object') } } };
+        if (name === '$toArray') return { k: 'fnret', ref: { array: this.collectionElement(r) || { td: this.tdOf('System.Object') }, js: true } };
         if (name === '$type') return { k: 'inst', ref: { prim: 'string', name: 'string' } };
         const m = this.members(r, false).get(name);
         if (m) {
@@ -498,17 +519,21 @@ export class Completer {
         const str = strArg(args);
         const r = str !== null ? this.parseTypeName(str) : null;
         switch (s.name) {
-          case 'type': return r && !r.prim ? { k: 'static', ref: r } : null;
+          case 'type': {
+            // Il2Cpp.type('string') is System.String's type proxy; Il2Cpp.type('X[]') has no statics to list
+            if (r && r.prim && r.prim !== 'void') { const td = this.tdOf(TYPE_ALIAS[str.trim()] || str.trim()); return td >= 0 ? { k: 'static', ref: { td } } : null; }
+            return r && !r.prim && !r.array ? { k: 'static', ref: r } : null;
+          }
           case 'find': case 'new': return r ? { k: 'inst', ref: r } : null;
-          case 'findAll': return r ? { k: 'inst', ref: { array: r } } : null;
+          case 'findAll': return r ? { k: 'inst', ref: { array: r, js: true } } : null;
           case 'gameObject': { const td = this.tdOf('UnityEngine.GameObject'); return td >= 0 ? { k: 'inst', ref: { td } } : null; }
-          case 'gameObjects': { const td = this.tdOf('UnityEngine.GameObject'); return td >= 0 ? { k: 'inst', ref: { array: { td } } } : null; }
+          case 'gameObjects': { const td = this.tdOf('UnityEngine.GameObject'); return td >= 0 ? { k: 'inst', ref: { array: { td }, js: true } } : null; }
           case 'typeOf': { const td = this.tdOf('System.Type'); return td >= 0 ? { k: 'inst', ref: { td } } : null; }
           case 'string': return str !== null ? { k: 'inst', ref: { td: this.tdOf('System.String') } } : { k: 'inst', ref: { prim: 'string', name: 'string' } };
           default: return null;
         }
       }
-      case 'fnret': return s.jsArray ? { k: 'js', v: [] } : { k: 'inst', ref: s.ref };
+      case 'fnret': return { k: 'inst', ref: s.ref };
       case 'of': {
         const margs = args.map((a) => (a.length === 1 && a[0].t === 'str' ? this.parseTypeName(a[0].v) : null));
         return { ...s.method, margs };
@@ -530,9 +555,20 @@ export class Completer {
     }
   }
 
-  elementOf(s) {
+  /** x[i], or (with `iter`) the variable of for (const v of x): arrays, and the common generic collections. */
+  elementOf(s, iter = false) {
     if (s.k === 'inst' && s.ref && s.ref.array) return { k: 'inst', ref: s.ref.array };
-    if (s.k === 'js' && Array.isArray(s.v)) return null;
+    if (iter && s.k === 'inst' && s.ref) { const e = this.collectionElement(s.ref); if (e) return { k: 'inst', ref: e }; }
+    return null;
+  }
+
+  /** What iterating a collection proxy yields (as the proxy's iterator does: a dictionary gives its values). */
+  collectionElement(r) {
+    if (!r || r.td === undefined || !r.args) return null;
+    const d = this.il.md.typeDef(r.td);
+    const n = `${d.namespace}.${d.name}`;
+    if (/^System\.Collections\.Generic\.(List|HashSet|Queue|Stack|LinkedList|SortedSet|IEnumerable|ICollection|IList|IReadOnlyList|IReadOnlyCollection|ISet)`1$/.test(n)) return r.args[0] || null;
+    if (/^System\.Collections\.Generic\.(Dictionary|SortedDictionary|SortedList|IDictionary|IReadOnlyDictionary)`2$/.test(n)) return r.args[1] || null;
     return null;
   }
 
@@ -571,10 +607,11 @@ export class Completer {
         if (!r) break;
         if (r.prim === 'string') { out.push(...jsItems(String.prototype, true)); out.push({ label: 'length', kind: 'field', detail: 'number' }); break; }
         if (r.prim === 'number') { out.push(...jsItems(Number.prototype, true)); break; }
+        if (r.prim === 'bigint') { out.push(...jsItems(BigInt.prototype, true)); break; }
         if (r.prim || r.gp) break;
         if (r.array) {
-          out.push({ label: 'length', kind: 'field', detail: `int — ${this.refName(r)}` });
-          out.push({ label: '$toArray', kind: 'helper', detail: `${this.refName(r.array)}[] as a JS array`, insert: '$toArray()' });
+          out.push({ label: 'length', kind: 'field', detail: `${r.js ? 'number' : 'int'} — ${this.refName(r)}` });
+          if (!r.js) out.push({ label: '$toArray', kind: 'helper', detail: `${this.refName(r.array)}[] as a JS array`, insert: '$toArray()' });
           for (const n of ['map', 'filter', 'find', 'forEach', 'some', 'every', 'indexOf', 'includes', 'slice', 'join', 'reduce']) out.push({ label: n, kind: 'method', detail: 'Array method (on a copy)', sort: 5 });
           break;
         }
@@ -610,7 +647,11 @@ export class Completer {
       case 'const': return { label: m.name, kind: 'const', detail: `const ${this.refName(m.ref)}`, sort: 1, dim: !m.pub };
       case 'enum': return { label: m.name, kind: 'enum', detail: `${this.refName(m.ref)} = ${this.enumValue(m)}`, sort: 0 };
       case 'prop': return { label: m.name, kind: 'prop', detail: `${pre}${this.refName(m.ref)} { ${m.get ? 'get; ' : ''}${m.set ? 'set; ' : ''}}`, sort: 1, dim: !m.pub, inherited: m.inherited };
-      case 'type': { const d = this.il.md.typeDef(m.td); return { label: m.name, kind: d.isEnum ? 'enumtype' : d.isValueType ? 'struct' : 'class', detail: `nested ${this.il.tdFullName(m.td)}`, sort: 4 }; }
+      case 'type': {
+        const d = this.il.md.typeDef(m.td);
+        const kind = d.isEnum ? 'enumtype' : d.isValueType ? 'struct' : d.isInterface ? 'interface' : 'class';
+        return { label: m.name, kind, detail: `nested ${d.isInterface ? 'interface ' : ''}${this.il.tdFullName(m.td)}`, sort: 4 };
+      }
       case 'method': {
         const sigs = m.metas.map((x, i) => this.sig(x, m.levels[i]));
         const noArgs = m.metas.every((x) => x.parameterCount === 0);
@@ -707,7 +748,7 @@ export class Completer {
             else if (x.t === 'p' && OPEN[x.v]) { if (depth === 0) break; depth--; }
           }
           const ch = chainBefore(toks.slice(i + 5, j), j - i - 5);
-          if (ch) locals.set(toks[i + 3].v, [...ch, { index: [] }]);
+          if (ch) locals.set(toks[i + 3].v, [...ch, { index: [], iter: true }]);
         }
         continue;
       }

@@ -7,14 +7,15 @@ export function addSettingsTab(name = 'Settings', o = {}) {
   const t = this.addTab(name, { group: o.group, icon: o.icon ?? Icons.settings });
 
   t.createSection('Appearance');
-  t.createDropdown(Object.keys(THEMES), (v) => this.setTheme(v), { label: 'Theme', selected: 0, save: false });
+  const themes = Object.keys(THEMES);
+  this._themeCtl = t.createDropdown(themes, (v) => this.setTheme(v), { label: 'Theme', selected: themes.findIndex((k) => THEMES[k].toLowerCase() === String(this.accent).toLowerCase()), save: false });
   this._accentCtl = t.createColorPicker('Accent Color', (v) => this.setAccent(v), { value: this.accent, save: false });
   this._opCtl = t.createSlider('Window Opacity', (v) => this.setOpacity(v / 100), {
     min: 30, max: 100, value: Math.round(this._opacity * 100), suffix: '%', save: false,
   });
   t.createTextInput('Window Icon URL', () => {}, {
     placeholder: 'png url, press Enter (empty = default)',
-    value: this._icon || '',
+    value: typeof this._icon === 'string' ? this._icon : '',
     save: false,
     onEnter: (v) => {
       this.setWindowIcon(v.trim() || null);
@@ -23,7 +24,11 @@ export function addSettingsTab(name = 'Settings', o = {}) {
   });
 
   t.createSection('Controls');
-  this._tkCtl = t.createKeybind('Toggle Key', (k) => { if (k) this.setToggleKey(k); }, { value: this.toggleKey, save: false });
+  // the window always needs a toggle key: clearing it puts the current one back
+  this._tkCtl = t.createKeybind('Toggle Key', (k) => {
+    if (k) this.setToggleKey(k);
+    else { this._tkCtl.setValue(this.toggleKey, true); this.notify('The window needs a toggle key: press a new one instead', 'warn'); }
+  }, { value: this.toggleKey, save: false });
 
   t.createSection('Config');
   const [a, b] = t.createColumns(2);
@@ -33,7 +38,7 @@ export function addSettingsTab(name = 'Settings', o = {}) {
   });
   b.createButton('Load', () => {
     const ok = this.loadConfig();
-    this.notify(ok ? 'Config loaded' : 'Nothing to load', ok ? 'success' : 'warn');
+    this.notify(ok ? 'Config loaded' : ok === null ? 'Nothing to load' : 'The saved config is damaged and couldn\'t be loaded', ok ? 'success' : 'warn');
   });
 
   const [c, d] = t.createColumns(2);

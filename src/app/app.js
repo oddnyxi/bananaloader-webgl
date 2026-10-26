@@ -2,12 +2,13 @@
 // the built-in Unity Explorer, tabs added by Banans, and Settings.
 import { UI } from '../odium/index.js';
 import { EXPLORER_HOST_ID } from '../hook.js';
-import { h } from '../ui/dom.js';
+import { h, copy } from '../ui/dom.js';
 import { SceneView } from '../ui/scene.js';
 import { ClassesView } from '../ui/classes.js';
 import { B, LOGO } from './brand.js';
 import { BanansView } from './banans.js';
 import { ConsoleView } from './console.js';
+import { BrowseView } from './browse.js';
 import { PrefsView } from './prefsview.js';
 import { PatchesView } from './patches.js';
 import { EditorView } from './editor.js';
@@ -39,6 +40,7 @@ export class App {
 
     const fill = (name, group, ic) => { const t = this.ui.addTab(name, { group, icon: ic }); t.page.classList.add('ue-fill'); return t; };
     this.tabs.banans = fill('Banans', 'Loader', B.banana);
+    this.tabs.browse = fill('Browse', 'Loader', B.download);
     this.tabs.console = fill('Console', 'Loader', B.terminal);
     this.tabs.prefs = this.ui.addTab('Preferences', { group: 'Loader', icon: B.sliders });
     this.tabs.patches = fill('Patches', 'Loader', B.hook);
@@ -57,6 +59,9 @@ export class App {
     this.tabs.editor.page.append(this.editor.el);
     this.banans = new BanansView(this);
     this.tabs.banans.page.append(this.banans.el);
+    this.browse = new BrowseView(this);
+    this.tabs.browse.page.append(this.browse.el);
+    this.tabs.browse.btn.addEventListener('click', () => this.browse.activate());
     this.console = new ConsoleView(this);
     this.tabs.console.page.append(this.console.el);
     this.prefsView = new PrefsView(this, this.tabs.prefs);
@@ -65,7 +70,12 @@ export class App {
     this.ui.selectTab(this.tabs.banans);
 
     loader.on('unload', (inst) => this.removeBananUI(inst));
-    loader.on('stage', () => { this._foot(); if (loader.stageAtLeast('initialized')) this._explorer(); });
+    loader.on('stage', () => {
+      this._foot();
+      if (loader.stageAtLeast('initialized')) this._explorer();
+      // one quiet update check per page load, once the game is up
+      if (loader.stageAtLeast('initialized') && !this._checkedUpdates && S.checkUpdates !== false && !S.safeMode) { this._checkedUpdates = true; setTimeout(() => this.browse.checkUpdates(false), 4000); }
+    });
     loader.on('banans', () => this._foot());
     loader.on('failed', (e) => this._failed(e));
     this._dropTarget();
@@ -80,7 +90,8 @@ export class App {
   get fmt() { return this.loader.fmt; }
 
   _explorer() {
-    if (this._explorerReady || !this.loader.settings.explorer || !this.loader.il) return;
+    // the tabs exist only when the setting was on at page load (changing it needs a reload)
+    if (this._explorerReady || !this.tabs.scene || !this.loader.il) return;
     this._explorerReady = true;
     this.scene = new SceneView(this);
     this.classes = new ClassesView(this, this.scene);
@@ -100,6 +111,7 @@ export class App {
   shadowActive() { try { return this.ui.root.getRootNode().activeElement; } catch (_) { return null; } }
 
   focusTab(id) {
+    if (id === 'browse' && this.browse) this.browse.activate();
     const t = this.tabs[id];
     if (t && this.ui.active !== t) this.ui.selectTab(t);
   }
@@ -110,9 +122,9 @@ export class App {
     const ptr = x && typeof x === 'object' && x.$ptr !== undefined ? x.$ptr : x;
     if (typeof ptr === 'string') { const td = il.findType(ptr); if (td < 0) throw new Error('type not found'); this.classes.reveal(td); return td; }
     if (typeof ptr === 'number' && ptr) {
+      this.ui.show(); // first, so the hierarchy can scroll to it
       if (il.tdOfKlass(il.klassOf(ptr)) === unity.td.GameObject) this.scene.select(ptr);
       else { this.focusTab('scene'); this.scene.inspector.show({ kind: 'obj', ptr }); }
-      this.ui.show();
       return ptr;
     }
     throw new Error('inspect() takes an object, an address or a type name');
@@ -184,10 +196,13 @@ export class App {
     win.addEventListener('dragover', (e) => { if (e.dataTransfer && [...e.dataTransfer.items].some((i) => i.kind === 'file')) { e.preventDefault(); win.classList.add('bl-drop'); } });
     win.addEventListener('dragleave', (e) => { if (e.target === win || !win.contains(e.relatedTarget)) win.classList.remove('bl-drop'); });
     win.addEventListener('drop', (e) => {
-      e.preventDefault();
       win.classList.remove('bl-drop');
       const files = [...(e.dataTransfer && e.dataTransfer.files || [])];
-      if (files.length) { this.focusTab('banans'); this.banans.installFiles(files); }
+      // only file drops are ours; dropped text goes into the console or editor as usual
+      if (!files.length) return;
+      e.preventDefault();
+      this.focusTab('banans');
+      this.banans.installFiles(files);
     });
   }
 
@@ -197,14 +212,17 @@ export class App {
     box.page.append(h('div.ue-note', { style: { margin: '0' }, html: 'Exports <code>game.d.ts</code> (every type in the chosen assemblies) and <code>bananaloader.d.ts</code> (the Banan API). Put them in a <code>types</code> folder next to your Banans with the <code>jsconfig.json</code>, and VS Code autocompletes <code>Il2Cpp.type(\'UnityEngine.Time\').</code>…' }));
     let picker = null;
     let publicOnly = true;
+    // the Banan API typings don't need the game: always offer them
+    const [b0, c0] = box.createColumns(2);
+    b0.createButton('bananaloader.d.ts', () => this.download('bananaloader.d.ts', apiDts), { icon: B.download });
+    c0.createButton('jsconfig.json', () => this.download('jsconfig.json', JSON.stringify({ compilerOptions: { checkJs: true, target: 'ES2022', module: 'commonjs', lib: ['ES2022', 'DOM'], strict: false, noImplicitAny: false }, include: ['*.js', 'types/*.d.ts'] }, null, 2)), { icon: B.download });
     const pick = () => {
       if (!L.il || picker) return;
       const imgs = L.il.md.images.map((im) => im.name.replace(/\.dll$/, ''));
       const def = imgs.filter((n) => /^(Assembly-CSharp|UnityEngine\.CoreModule|UnityEngine\.PhysicsModule|UnityEngine\.UI|UnityEngine\.UIModule|UnityEngine\.InputLegacyModule|UnityEngine\.AnimationModule|UnityEngine\.AudioModule|mscorlib)$/.test(n) || /^Assembly-CSharp/.test(n));
       picker = box.createMultiSelect(imgs, () => {}, { label: 'Assemblies', selected: def, save: false });
       box.createToggle('Public members only (much smaller)', (v) => { publicOnly = v; }, true, { save: false });
-      const [a, b, c] = box.createColumns(3);
-      a.createButton('game.d.ts', () => {
+      box.createButton('game.d.ts', () => {
         const sel = new Set(picker.getValue());
         const images = L.il.md.images.map((im, i) => [im.name.replace(/\.dll$/, ''), i]).filter(([n]) => sel.has(n)).map(([, i]) => i);
         const t0 = performance.now();
@@ -214,8 +232,6 @@ export class App {
         this.download('game.d.ts', text);
         this.notify(`game.d.ts: ${gen.included.size.toLocaleString()} types, ${(text.length / 1048576).toFixed(1)} MB in ${Math.round(performance.now() - t0)} ms`, 'success', 4000);
       }, { icon: B.download });
-      b.createButton('bananaloader.d.ts', () => this.download('bananaloader.d.ts', apiDts), { icon: B.download });
-      c.createButton('jsconfig.json', () => this.download('jsconfig.json', JSON.stringify({ compilerOptions: { checkJs: true, target: 'ES2022', module: 'commonjs', lib: ['ES2022', 'DOM'], strict: false, noImplicitAny: false }, include: ['*.js', 'types/*.d.ts'] }, null, 2)), { icon: B.download });
     };
     if (L.il) pick(); else L.on('stage', pick);
   }
@@ -259,7 +275,14 @@ export class App {
       .setTooltip('Starts the game without any Banans, to get past a broken one.');
     t.createToggle('Direct-call patching', (v) => { S.directCalls = v; save(); this.notify('Takes effect after a page reload', 'info'); }, S.directCalls !== false, { save: false })
       .setTooltip('Rewrites the game\'s wasm as it loads so patches also catch calls compiled straight into game code.');
+    t.createToggle('Catch direct calls without reloading', (v) => { S.directCallsAll = v; save(); this.notify('Takes effect after a page reload', 'info'); }, S.directCallsAll === true, { save: false })
+      .setTooltip('Rewrites every method\'s direct calls as the game loads, so new patches catch every call straight away, with no reload. Costs about 0.1–0.3 s at load (the wasm is compiled from bytes, without the browser\'s code cache) and makes method calls slightly slower.');
     t.createToggle('Unity Explorer tabs', (v) => { S.explorer = v; save(); this.notify('Takes effect after a page reload', 'info'); }, S.explorer, { save: false });
+    t.createSection('bananaloader.com');
+    t.createToggle('Check for Banan updates when a game starts', (v) => { S.checkUpdates = v; save(); }, S.checkUpdates !== false, { save: false })
+      .setTooltip('Asks bananaloader.com once per page load whether Banans you installed from Browse have new versions. Sends only their names and versions.');
+    t.createTextInput('Registry address', (v) => { S.registry = String(v || '').trim() || 'https://api.bananaloader.com'; save(); }, { value: S.registry || 'https://api.bananaloader.com', placeholder: 'https://api.bananaloader.com', save: false })
+      .setTooltip('Where the Browse tab looks for Banans. Leave as https://api.bananaloader.com unless you run your own server.');
     t.createSection('Loading screen');
     const boot = L.bootstrap;
     if (boot) {
@@ -267,12 +290,17 @@ export class App {
       const lkeys = ['full', 'compact', 'off'];
       t.createDropdown(lmodes, (v) => boot.saveSettings({ modal: lkeys[lmodes.indexOf(v)] || 'full' }), { label: 'Bootstrap loading screen', selected: Math.max(0, lkeys.indexOf(boot.settings.modal)), save: false })
         .setTooltip('Shown while the game loads, with download, compile and IL2CPP details. Shared with Unity Explorer.');
-      t.createToggle('Hide it automatically when everything is ready', (v) => boot.saveSettings({ autoHide: v }), boot.settings.autoHide !== false, { save: false });
+      // the loading screen and this switch must agree: a missing or odd stored value means "on"
+      const autoHide = boot.settings.autoHide !== false;
+      if (typeof boot.settings.autoHide !== 'boolean') { try { boot.saveSettings({ autoHide }); } catch (_) { /* older bootstrap */ } }
+      t.createToggle('Hide it automatically when everything is ready', (v) => boot.saveSettings({ autoHide: v }), autoHide, { save: false });
       const [x, y] = t.createColumns(2);
       x.createButton('Show loading screen', () => boot.ui && boot.ui.reopen());
-      y.createButton('Copy bootstrap report', () => {
+      y.createButton('Copy bootstrap report', async () => {
         const text = boot.report();
-        try { navigator.clipboard.writeText(text); this.notify('Bootstrap report copied', 'success'); } catch (_) { this.ui.prompt('Bootstrap report', { value: text, multiline: true }); }
+        // the page can block the clipboard (iframes): then show the text to copy by hand
+        if (await copy(text)) this.notify('Bootstrap report copied', 'success');
+        else this.ui.prompt('Bootstrap report', { value: text, multiline: true });
       });
     }
     t.createSection('Explorer');
@@ -297,8 +325,13 @@ export class App {
       inp.onchange = async () => {
         try {
           const data = JSON.parse(await inp.files[0].text());
-          for (const x of data.banans || []) await L.install(x.source, { origin: x.origin === 'folder' ? 'file' : x.origin, url: x.url, file: x.id });
-          this.notify(`Imported ${(data.banans || []).length} Banans`, 'success');
+          const list = (data && Array.isArray(data.banans) ? data.banans : []).filter((x) => x && typeof x.source === 'string');
+          for (const x of list) {
+            const e = await L.install(x.source, { origin: x.origin === 'folder' ? 'file' : x.origin, url: x.url, file: x.id, enabled: x.enabled !== false });
+            // Banans that were off in the backup stay off
+            if (x.enabled === false && e && e.rec.enabled !== false) await L.setEnabled(e, false);
+          }
+          this.notify(`Imported ${list.length} Banan${list.length === 1 ? '' : 's'}`, 'success');
         } catch (e) { this.notify('Import failed: ' + (e.message || e), 'error'); }
       };
       inp.click();

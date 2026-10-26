@@ -73,7 +73,9 @@ export function createWindow(title = 'ODIUM', o = {}) {
   this.setToggleKey(toggleKey);
   this.setAccent(this.accent);
   this.setOpacity(this._opacity);
-  this.setWindowIcon(o.icon !== undefined ? o.icon : this._icon);
+  // o.icon is the app's own logo: what "empty = default" goes back to
+  if (o.icon !== undefined) this._defaultIcon = o.icon;
+  this.setWindowIcon(this._icon);
 
   (document.body || document.documentElement).appendChild(this.host);
   this.tabs.forEach((t) => this._mount(t));

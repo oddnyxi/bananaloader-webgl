@@ -1,4 +1,4 @@
-import { Handle } from './Handle.js';
+import { Handle, track } from './Handle.js';
 
 /**
  * Anything that can hold controls: a Tab, a Group, a Column, a SubTab pane.
@@ -15,6 +15,7 @@ export class Container {
     this._cm = null;
     this._hk = null;
     this._key = null;
+    track(ui, this);
   }
 
   /** Wrap a node in a Handle and append it to this container. */

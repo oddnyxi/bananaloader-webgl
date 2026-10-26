@@ -20,7 +20,10 @@ export function wasmUrls() {
 export async function fetchGameWasm(log = () => {}) {
   for (const url of wasmUrls()) {
     try {
-      const r = await fetch(url, { cache: 'force-cache' });
+      // the page's own fetch, so the bootstrap doesn't count this as one of the game's downloads
+      const boot = window.__unityBootstrap;
+      const get = (boot && typeof boot.rawFetch === 'function' && boot.rawFetch) || fetch;
+      const r = await get.call(window, url, { cache: 'force-cache' });
       if (!r.ok) continue;
       const bytes = await inflate(new Uint8Array(await r.arrayBuffer()));
       if (isWasm(bytes) && bytes.length > 1 << 20) { log(`wasm: ${url} (${(bytes.length / 1048576).toFixed(1)} MB)`); return { bytes, url }; }

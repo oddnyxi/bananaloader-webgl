@@ -57,6 +57,10 @@ export class Bootstrap {
     this.analysis = null; // { signatures, fnTables, ... } from the wasm bytes
     this.hintsExtra = {};
     this.facts = new Map(); // things tools found out ("Unity" -> "2019.3.0f6", "IL2CPP" -> "metadata v24.2")
+    // a tool that rewrites the game's wasm before it compiles maps its bytes to the game's own,
+    // so the analysis and dumps describe the real module
+    this.originalBytes = new WeakMap();
+    this.rawFetch = null; // the page's fetch, before the bootstrap wrapped it (for our own requests)
   }
 
   // ------------------------------------------------------------------ time, events
@@ -304,7 +308,7 @@ export class Bootstrap {
         wait(text) { s.status = 'waiting'; s.detail = text; self.changed(); },
         done(text) { if (text !== undefined) s.detail = text; s.status = 'done'; s.end = self.now(); self.changed(); },
         skip(text) { if (text !== undefined) s.detail = text; s.status = 'skipped'; s.end = self.now(); self.changed(); },
-        fail(err) { s.status = 'error'; s.error = String(err && err.message || err); s.end = self.now(); self.log(`${c.name}: ${label} failed · ${s.error}`, 'error', c.name); },
+        fail(err) { s.status = 'error'; s.error = String(err && err.message || err); s.end = self.now(); self.log(`${c.name}: ${s.label || id} failed · ${s.error}`, 'error', c.name); },
       };
     };
     c.api = {
@@ -355,7 +359,7 @@ export class Bootstrap {
   }
 
   get finished() { return this.phase('attach').status === 'done' || this.phase('attach').status === 'error'; }
-  get failed() { return !!this.state.unsupported || this.phases.some((p) => p.status === 'error') || this.clients.some((c) => c.status === 'error'); }
+  get failed() { return !!this.state.unsupported || !!this.state.error || this.phases.some((p) => p.status === 'error') || this.clients.some((c) => c.status === 'error'); }
 
   /**
    * Keep a tool's window out of the way while the full-screen loading screen is up, and show it
@@ -402,7 +406,11 @@ export class Bootstrap {
       if (w.exportCount != null) L.push(`  ${w.importCount} imports · ${w.exportCount} exports`);
     }
     const a = this.analysis;
-    if (a) L.push(`  analysis: ${a.summary}`);
+    if (a) { if (!w) L.push('', 'WebAssembly:'); L.push(`  analysis: ${a.summary}`); }
+    if (this.facts.size) {
+      L.push('', 'Facts:');
+      for (const [k, v] of this.facts) L.push(`  ${pad(k, 14)} ${typeof v === 'object' ? safeJson(v) : String(v)}`);
+    }
     if (s.runtime) L.push('', `Runtime: Module at +${fmtMs(s.runtime.at)} (${s.runtime.how || '?'})${s.runtime.startedAt != null ? `, started at +${fmtMs(s.runtime.startedAt)}` : ', not started'}`);
     for (const cl of this.clients) {
       L.push('', `${cl.name} ${cl.version || ''} — ${cl.status}${cl.summary ? ' · ' + cl.summary : ''}`);
@@ -415,19 +423,21 @@ export class Bootstrap {
   }
 }
 
+function safeJson(v) { try { return JSON.stringify(v, (k, x) => (typeof x === 'bigint' ? x + 'n' : x)); } catch (_) { return String(v); } }
+
 function icon(st) { return { done: '✓', error: '✕', active: '…', waiting: '…', skipped: '–', pending: '·' }[st] || '·'; }
 
 /** What part of a Unity build a file is, from its name. */
 export function classify(name) {
   const n = name.toLowerCase();
   if (/unityloader\.js$|\.loader\.js$/.test(n)) return 'loader';
+  if (/symbols/.test(n)) return 'symbols';
   if (/\.json$/.test(n)) return 'manifest';
   if (/framework/.test(n)) return 'framework';
   if (/\.wasm(\.code)?(\.unityweb|\.gz|\.br)?$|\.wasm\.code\.unityweb$/.test(n)) return 'code';
   if (/\.asm\.code|\.asm\.js/.test(n)) return 'asm.js';
   if (/\.data(\.unityweb|\.gz|\.br)?$/.test(n)) return 'data';
-  if (/\.mem(\.unityweb)?$/.test(n)) return 'memory';
-  if (/symbols/.test(n)) return 'symbols';
+  if (/\.mem(ory)?(\.unityweb)?$/.test(n)) return 'memory';
   return 'other';
 }
 

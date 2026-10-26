@@ -32,6 +32,8 @@ export class Banan {
   // ---- helpers (the loader fills in info, logger, loader before onPreInitialize)
 
   get il() { return this.loader.il; }
+  /** Throws once the Banan has been unloaded (an async continuation outliving it). */
+  _alive(what) { if (this._disposed) throw new Error(`${this.info ? this.info.name : 'Banan'} is unloaded: ${what} ignored`); }
   get unity() { return this.loader.unity; }
   get Il2Cpp() { return this.loader.Il2Cpp; }
 
@@ -49,21 +51,22 @@ export class Banan {
    * hooks: { prefix(ctx) -> false skips the original, postfix(ctx), sig: paramCount | ['System.String', ...], priority }
    */
   patch(target, hooks) {
-    const p = this.loader.patcher.patch(this, target, hooks);
-    return p;
+    this._alive('patch()');
+    if (!this.loader.interop) throw new Error('patch() needs IL2CPP: call it from onInitializeBanan or later');
+    return this.loader.patcher.patch(this, target, hooks);
   }
 
   unpatchAll() { this.loader.patcher.unpatchOwner(this); }
 
   /** Run a generator across frames. yield: nothing = next frame, a number = seconds, a Promise = until it settles. */
-  startCoroutine(gen) { return this.loader.coroutines.start(this, gen); }
+  startCoroutine(gen) { this._alive('startCoroutine()'); return this.loader.coroutines.start(this, gen); }
   stopCoroutine(c) { this.loader.coroutines.stop(c); }
 
   /** An Odium UI tab in the loader window, removed when the Banan unloads. */
-  createTab(name, o = {}) { return this.loader.app.createBananTab(this, name, o); }
+  createTab(name, o = {}) { this._alive('createTab()'); return this.loader.app.createBananTab(this, name, o); }
 
   /** A keyboard shortcut ('F5', 'Ctrl+K'), removed on unload. Works while the game has focus. */
-  onKey(spec, fn) { return this.loader.app.bindKey(this, spec, fn); }
+  onKey(spec, fn) { this._alive('onKey()'); return this.loader.app.bindKey(this, spec, fn); }
 
   /**
    * Another Banan's API (its `api` property, or the instance itself). Declare it with
@@ -85,8 +88,22 @@ export class Banan {
   notify(text, type = 'info') { this.loader.app.notify(text, type); }
 
   /** setInterval / setTimeout that are cleared when the Banan unloads. */
-  setInterval(fn, ms) { const id = setInterval(() => this.loader.safe(this, 'interval', fn), ms); this._timers.push(id); return id; }
-  setTimeout(fn, ms) { const id = setTimeout(() => this.loader.safe(this, 'timeout', fn), ms); this._timers.push(id); return id; }
+  setInterval(fn, ms, ...args) {
+    if (this._disposed) return 0;
+    if (typeof fn !== 'function') throw new TypeError('setInterval expects a function');
+    const id = setInterval(() => this.loader.safeCall(this, 'setInterval callback', fn, args), ms);
+    (this._timers ||= []).push(id);
+    return id;
+  }
+  setTimeout(fn, ms, ...args) {
+    if (this._disposed) return 0;
+    if (typeof fn !== 'function') throw new TypeError('setTimeout expects a function');
+    const id = setTimeout(() => { this._timers = this._timers.filter((t) => t !== id); this.loader.safeCall(this, 'setTimeout callback', fn, args); }, ms);
+    (this._timers ||= []).push(id);
+    return id;
+  }
+  clearInterval(id) { clearInterval(id); this._timers = (this._timers || []).filter((t) => t !== id); }
+  clearTimeout(id) { clearTimeout(id); this._timers = (this._timers || []).filter((t) => t !== id); }
 }
 
 /** Plugins load first and get onPreInitialize / onApplicationStarted (MelonPlugin). */

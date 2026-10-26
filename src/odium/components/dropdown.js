@@ -30,7 +30,7 @@ export function createDropdown(options = [], action, o = {}) {
   };
   const pick = (i, silent) => {
     if (typeof i === 'string') i = opts.indexOf(i);
-    if (i == null) i = -1;
+    if (i == null || !Number.isInteger(i) || i < 0 || i >= opts.length) i = -1;
     idx = i;
     ct.textContent = opts[i] ?? '—';
     build();
@@ -40,10 +40,12 @@ export function createDropdown(options = [], action, o = {}) {
   head.onclick = () => openPopup(this.ui, n);
   c.getValue = () => opts[idx];
   c.getIndex = () => idx;
-  c.setValue = (v, silent) => { pick(v, silent); return c; };
+  // a value that is one of the options wins (configs store values, and options can be numbers);
+  // otherwise a number is an index
+  c.setValue = (v, silent) => { const j = opts.indexOf(v); pick(j >= 0 ? j : v, silent); return c; };
   c.setOptions = (arr) => { opts = arr.slice(); idx = -1; ct.textContent = '—'; build(); return c; };
 
   build();
-  if ((o.selected ?? -1) >= 0) pick(o.selected, true);
+  if (o.selected != null && o.selected !== -1) pick(o.selected, true);
   return this._reg(c, label, o);
 }

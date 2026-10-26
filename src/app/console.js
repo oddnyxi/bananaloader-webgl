@@ -31,7 +31,7 @@ export class ConsoleView {
     this.input.addEventListener('input', () => { this.input.style.height = 'auto'; this.input.style.height = Math.min(160, this.input.scrollHeight) + 'px'; });
     this.el = h('div.con',
       h('div.ue-bar', this.srcSel, lvl, h('div.ue-search', { html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>' }, search),
-        h('button.ue-ib', { title: 'Copy log', html: B.copy, on: { click: () => { copy(this.visible().map(fmtLine).join('\n')); app.notify('Log copied', 'success', 1200); } } }),
+        h('button.ue-ib', { title: 'Copy log', html: B.copy, on: { click: async () => { const ok = await copy(this.visible().map(fmtLine).join('\n')); app.notify(ok ? 'Log copied' : 'Couldn\'t copy: the page blocks the clipboard', ok ? 'success' : 'error', ok ? 1200 : 3000); } } }),
         h('button.ue-ib', { title: 'Clear', html: B.trash, on: { click: () => { this.loader.hub.lines.length = 0; this.redraw(); } } })),
       this.out,
       h('div.con-in', this.input, h('button.ue-btn.pri', { on: { click: () => this.run() } }, icon(B.play, 'i'), 'Run')));
@@ -46,6 +46,8 @@ export class ConsoleView {
     this.srcSel.replaceChildren(h('option', { value: '', text: 'All sources' }), h('option', { value: 'BananaLoader', text: 'BananaLoader' }));
     for (const e of this.loader.ordered()) this.srcSel.append(h('option', { value: e.info.name, text: e.info.name }));
     this.srcSel.value = cur || '';
+    // the filtered Banan is gone: show everything again instead of an empty, mislabelled log
+    if (this.srcSel.value !== this.source) { this.source = this.srcSel.value; this.redraw(); }
   }
 
   pass(l) {
@@ -60,8 +62,7 @@ export class ConsoleView {
   visible() { return this.loader.hub.lines.filter((l) => this.pass(l)); }
 
   row(l) {
-    const t = l.time;
-    const ts = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}:${String(t.getSeconds()).padStart(2, '0')}.${String(t.getMilliseconds()).padStart(3, '0')}`;
+    const ts = clock(l.time);
     return h('div.l.' + (LEVEL_CLASS[l.level] || 'msg'),
       h('span.ts', ts), ' ',
       l.source === 'BananaLoader' && l.level === 'big' ? null : h('span.src', { style: { color: l.color } }, `[${l.source}]`), l.source === 'BananaLoader' && l.level === 'big' ? '' : ' ',
@@ -118,7 +119,9 @@ export class ConsoleView {
     try {
       const types = L.interop ? L.interop.typeScope({ unityFirst: true }) : Object.create(null);
       const r = fn(types)(...keys.map((k) => scope[k]));
-      Promise.resolve(r).then((v) => { if (v !== undefined) con.msg(show(v)); }, (e) => con.error(String(e && e.message || e)));
+      // only real promises are awaited: a thenable like the Emscripten Module resolves with itself forever
+      if (r instanceof Promise) r.then((v) => { if (v !== undefined) con.msg(show(v)); }, (e) => con.error(String(e && e.message || e)));
+      else if (r !== undefined) con.msg(show(r));
     } catch (e) { con.error(String(e && e.message || e)); }
   }
 }
@@ -135,7 +138,9 @@ function show(v) {
   return String(v);
 }
 
-const fmtLine = (l) => `[${l.time.toISOString().slice(11, 23)}] [${l.source}] ${l.text}`;
+/** Local time, as shown in the log (copied lines use the same clock). */
+const clock = (t) => `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}:${String(t.getSeconds()).padStart(2, '0')}.${String(t.getMilliseconds()).padStart(3, '0')}`;
+const fmtLine = (l) => `[${clock(l.time)}] [${l.source}] ${l.text}`;
 
 /** Console code with bare type names: scope helpers are parameters (they win), `with` supplies types. */
 function compileWithTypes(keys, body) {

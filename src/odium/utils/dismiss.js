@@ -3,15 +3,17 @@
  * whether that click lands elsewhere in the UI or on the page behind it.
  */
 export function openPopup(ui, node, cls = 'open') {
-  if (node.classList.contains(cls)) { node.classList.remove(cls); return; }
+  if (node.classList.contains(cls)) { if (node._closePopup) node._closePopup(); else node.classList.remove(cls); return; }
   node.classList.add(cls);
   const inside = (e) => { if (!node.contains(e.target)) close(); };
   const outside = (e) => { if (e.target !== ui.host) close(); };
   const close = () => {
+    node._closePopup = null;
     node.classList.remove(cls);
     ui.root && ui.root.removeEventListener('pointerdown', inside, true);
     window.removeEventListener('pointerdown', outside, true);
   };
+  node._closePopup = close;
   setTimeout(() => {
     if (!node.classList.contains(cls)) return;
     ui.root && ui.root.addEventListener('pointerdown', inside, true);

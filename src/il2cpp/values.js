@@ -162,8 +162,16 @@ export class ValueFormatter {
         const n = il.mem.i32At(obj + size.offset);
         if (!arr) return { total: 0, items: [] };
         const a = il.arrayInfo(arr);
+        // .NET enumeration order: a List front to back, a Queue from _head (wrapping around), a Stack top first
+        const headF = d.name === 'Queue`1' ? fields.find((x) => x.name === '_head') : null;
+        const head = headF ? il.mem.i32At(obj + headF.offset) : 0;
+        const at = (i) => {
+          if (d.name === 'Stack`1') return n - 1 - i;
+          if (headF && a.length) return (head + i) % a.length;
+          return i;
+        };
         const out = [];
-        for (let i = start; i < n && i < start + max; i++) out.push({ label: `[${i}]`, type: a.elemType, addr: a.data + i * a.elemSize });
+        for (let i = start; i < n && i < start + max; i++) out.push({ label: `[${i}]`, type: a.elemType, addr: a.data + at(i) * a.elemSize });
         return { total: n, items: out };
       }
     }
@@ -184,10 +192,11 @@ export class ValueFormatter {
         const n = il.mem.i32At(obj + cf.offset);
         const out = [];
         if (keyF && valF) {
-          for (let i = 0; i < n && out.length < max; i++) {
+          let seen = 0;
+          for (let i = 0; i < n && i < a.length && out.length < max; i++) {
             const e = a.data + i * a.elemSize;
             if (hashF && il.mem.i32At(e + hashF.offset - 8) < 0) continue; // free slot
-            if (out.length < start) continue;
+            if (seen++ < start) continue; // earlier pages
             const kd = this.describe(keyF.type, e + keyF.offset - 8);
             out.push({ label: `[${kd.kind === 'string' ? JSON.stringify(kd.text) : kd.text}]`, type: valF.type, addr: e + valF.offset - 8 });
           }
@@ -202,8 +211,12 @@ export class ValueFormatter {
     const il = this.il;
     const fs = il.fieldsOfStructType(p) || [];
     if (!fs.length) return '{}';
-    if (fs.length <= 4 && fs.every((f) => { const k = il.typeInfo(f.type).kind; return INTS.has(k) || FLOATS.has(k) || k === T.BOOLEAN; })) {
-      return '(' + fs.map((f) => { const v = il.readValue(addr + f.offset, f.type); const k = il.typeInfo(f.type).kind; return k === T.BOOLEAN ? String(v) : fmtNumber(v, k); }).join(', ') + ')';
+    if (fs.length <= 4 && fs.every((f) => { const k = il.typeInfo(f.type).kind; return INTS.has(k) || FLOATS.has(k) || k === T.BOOLEAN || k === T.CHAR; })) {
+      return '(' + fs.map((f) => {
+        const v = il.readValue(addr + f.offset, f.type);
+        const k = il.typeInfo(f.type).kind;
+        return k === T.BOOLEAN ? String(v) : k === T.CHAR ? `'${v}'` : fmtNumber(v, k);
+      }).join(', ') + ')';
     }
     return `{${il.typeName(p)}}`;
   }
@@ -213,7 +226,7 @@ export class ValueFormatter {
     if (!obj || typeof obj !== 'object') return String(obj);
     const fs = il.fieldsOfStructType(p) || [];
     const vals = fs.map((f) => {
-      const v = obj[f.name];
+      const v = obj[f.name] !== undefined ? obj[f.name] : obj[f.name.replace(/^<(.+)>k__BackingField$/, '$1')];
       const k = il.typeInfo(f.type).kind;
       if (typeof v === 'number' || typeof v === 'bigint') return fmtNumber(v, k);
       if (typeof v === 'boolean') return String(v);

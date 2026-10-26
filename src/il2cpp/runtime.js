@@ -17,12 +17,19 @@ const hex = (n) => '0x' + (n >>> 0).toString(16);
 const WASM_OF = { i32: 'i32', ptr: 'i32', i64: 'i64', f32: 'f32', f64: 'f64' };
 
 // CLR names -> the C# keywords typeName() prints for primitives
-const ALIAS = {
+export const ALIAS = {
   'System.Void': 'void', 'System.Boolean': 'bool', 'System.Char': 'char', 'System.SByte': 'sbyte', 'System.Byte': 'byte',
   'System.Int16': 'short', 'System.UInt16': 'ushort', 'System.Int32': 'int', 'System.UInt32': 'uint', 'System.Int64': 'long',
   'System.UInt64': 'ulong', 'System.Single': 'float', 'System.Double': 'double', 'System.String': 'string', 'System.Object': 'object',
   'System.IntPtr': 'IntPtr', 'System.UIntPtr': 'UIntPtr',
 };
+
+/** Struct values use the property name for auto-property backing fields: <Count>k__BackingField → Count. */
+export function fieldKey(n) { const m = /^<(.+)>k__BackingField$/.exec(n); return m ? m[1] : n; }
+/** A struct field's value from a JS object, under its raw name or its property name. */
+const fieldOf = (obj, name) => (obj[name] !== undefined ? obj[name] : obj[fieldKey(name)]);
+/** One truthiness rule for bool parameters and fields ('false' and '0' are false). */
+const toBool = (v) => (typeof v === 'string' ? /^(true|1)$/i.test(v.trim()) : !!v);
 
 export class ManagedError extends Error {
   constructor(message, info = {}) { super(message); Object.assign(this, info); }
@@ -62,6 +69,8 @@ export class Il2Cpp {
     // fastcomp (Unity 2018 – 2021.1) may return the high half of a legalized i64 in tempRet0
     this.getTempRet0 = pick('getTempRet0', '_getTempRet0');
     this.setTempRet0 = pick('setTempRet0', '_setTempRet0');
+    // native wasm exception handling (a Unity 6 option): C++ exceptions carry this tag
+    this.cppTag = [exp, hints.exports || {}].map((x) => x.__cpp_exception).find((x) => x && typeof x === 'object') || null;
     const names = Object.keys(exp);
     this.flavor = hints.flavor || (names.includes('_malloc') || names.includes('_free') ? 'fastcomp' : 'upstream');
     this.sigs = hints.signatures || null;
@@ -185,16 +194,34 @@ export class Il2Cpp {
       const d = this.desc(m);
       const { il } = this._ilSig(d);
       const nI64 = il.filter((x) => x === 'i64').length;
-      const kept = il.length - (d._dropMI ? 1 : 0);
       let len;
-      const slot = this.slotOf(d);
+      const slot = this.slotOf(d); // sets d._dropMI, so read that after
       if (slot <= 0) continue;
+      const kept = il.length - (d._dropMI ? 1 : 0);
       const exact = this.sigs && this.sigs.of(slot);
       if (exact) len = exact.params.length;
       else { try { len = this.fn(slot).length; } catch (_) { continue; } }
       if (len === kept) { this.i64Mode = 'native'; return; }
       if (len === kept + nI64) { this.i64Mode = 'legalized'; return; }
     }
+  }
+
+  /**
+   * Before code modules got their own adjustor-thunk table (v24.0 – 24.4, v27.0: Unity 2018 –
+   * 2020.1), instance methods of structs are listed by their adjustor thunk, which takes the
+   * *boxed* object and adds 8 itself. Callers pass the address of the struct data, so the bridge
+   * passes 8 less. Runtime MethodInfos (generic instances, overloads from a class) without a
+   * virtualMethodPointer (before 2021.2) point struct methods at the thunk too.
+   */
+  boxedThis(d) {
+    if (!this.reg || d.isStatic) return false;
+    // flat table (v24.0/24.1), or code modules without their own adjustor-thunk table (v24.2 – 24.4, v27.0)
+    if (d._boxedThis !== undefined) return d._boxedThis;
+    if (this._thunkedStructs === undefined) this._thunkedStructs = !!this.reg.flat || (this.reg.adjustorThunks === false) || (this.reg.adjustorThunks == null && this.md.version < 29);
+    // runtime MethodInfos before 2021.2 (no virtualMethodPointer) always point struct methods at the thunk
+    const thunked = d.mi ? this.layout.mi.vptr < 0 : this._thunkedStructs;
+    d._boxedThis = thunked && d.declTd >= 0 && this.md.typeDef(d.declTd).isValueType;
+    return d._boxedThis;
   }
 
   /** Does the compiled function take a `this` argument? (static ones did too, until Unity 2018.3) */
@@ -536,7 +563,16 @@ export class Il2Cpp {
 
   findType(fullName) {
     let i = this.byFullName.get(fullName);
-    if (i === undefined) i = this.byFullName.get(fullName.replace(/\./g, '+').replace(/^([^+]*)\+/, '$1.'));
+    if (i === undefined && fullName.includes('.') && !fullName.includes('+')) {
+      // nested types written with dots: try each split between namespace and the nesting chain
+      const parts = fullName.split('.');
+      for (let s = parts.length - 1; s >= 0 && i === undefined; s--) {
+        const head = parts.slice(0, s).join('.');
+        const tail = parts.slice(s).join('+');
+        if (s === parts.length - 1 && !head) continue;
+        i = this.byFullName.get(head ? `${head}.${tail}` : tail);
+      }
+    }
     return i === undefined ? -1 : i;
   }
 
@@ -703,14 +739,17 @@ export class Il2Cpp {
   /** Il2CppType* for a type name, supporting generic syntax: "System.Collections.Generic.List<System.Int32>". */
   resolveTypeName(name) {
     name = name.trim();
-    const PRIM = { int: 'System.Int32', uint: 'System.UInt32', long: 'System.Int64', ulong: 'System.UInt64', short: 'System.Int16', ushort: 'System.UInt16', byte: 'System.Byte', sbyte: 'System.SByte', float: 'System.Single', double: 'System.Double', bool: 'System.Boolean', char: 'System.Char', string: 'System.String', object: 'System.Object' };
+    const PRIM = { int: 'System.Int32', uint: 'System.UInt32', long: 'System.Int64', ulong: 'System.UInt64', short: 'System.Int16', ushort: 'System.UInt16', byte: 'System.Byte', sbyte: 'System.SByte', float: 'System.Single', double: 'System.Double', bool: 'System.Boolean', char: 'System.Char', string: 'System.String', object: 'System.Object', IntPtr: 'System.IntPtr', UIntPtr: 'System.UIntPtr', void: 'System.Void' };
     if (PRIM[name]) name = PRIM[name];
     if (name.endsWith('[]')) {
       const el = this.resolveTypeName(name.slice(0, -2));
-      const t = this.call(this.findMethod('System.RuntimeType', 'MakeArrayType', 0) || this.findMethod('System.MonoType', 'MakeArrayType', 0) || this.findMethod('System.Type', 'MakeArrayType', 0), this.typeObject(el));
+      const mk = this.findMethod('System.RuntimeType', 'MakeArrayType', 0) || this.findMethod('System.MonoType', 'MakeArrayType', 0) || this.findMethod('System.Type', 'MakeArrayType', 0);
+      if (!mk || this.whyNotCallable(mk)) throw new Error(`can't make the array type ${name}: Type.MakeArrayType isn't available in this build`);
+      const t = this.call(mk, this.typeObject(el));
       return this._typeOfTypeObject(t);
     }
     const lt = name.indexOf('<');
+    if (lt >= 0 && name.lastIndexOf('>') < lt) throw new Error(`type name ${name}: missing closing '>'`);
     if (lt < 0) {
       const td = this.findType(name);
       if (td < 0) throw new Error(`type ${name} not found`);
@@ -767,27 +806,35 @@ export class Il2Cpp {
    * Goes through reflection (MethodInfo.MakeGenericMethod), which hands back a runtime
    * MethodInfo* with resolved code and the context shared generic code needs.
    */
-  inflateMethod(meta, argTypes) {
-    const key = meta.index + ':' + argTypes.join(',');
+  inflateMethod(meta, argTypes, klass = 0) {
+    const declTd = meta.declaringType;
+    const onGeneric = this.md.typeDef(declTd).isGeneric;
+    // a generic method of a generic type needs the instantiated class (List<int>), i.e. the instance's
+    let k = 0;
+    if (onGeneric) {
+      for (let c = klass, g = 0; c && g < 64; c = this.parentKlass(c), g++) if (this.tdOfKlass(c) === declTd) { k = c; break; }
+      if (!k) throw new Error(`${meta.name}<…> is declared on the generic type ${this.tdFullName(declTd)}: call it on an instance (or on Il2Cpp.type('${this.tdFullName(declTd)}<…>'))`);
+    }
+    const key = meta.index + ':' + (k || '') + ':' + argTypes.join(',');
     this._ginfl ||= new Map();
     if (this._ginfl.has(key)) return this._ginfl.get(key);
-    const declTd = meta.declaringType;
-    if (this.md.typeDef(declTd).isGeneric) throw new Error('generic methods of generic types: call them on an instance');
-    const k = this.ensureClass(declTd);
+    if (!k) k = this.ensureClass(declTd);
     const local = meta.index - this.md.typeDef(declTd).methodStart;
     const arr = k && this.layout.methods !== undefined ? this.mem.u32At(k + this.layout.methods) : 0;
     const defMi = arr ? this.mem.u32At(arr + local * 4) : 0;
     if (!this.mem.valid(defMi)) throw new Error(`no runtime MethodInfo for ${meta.name} (class not set up)`);
-    const fromHandle = this.findMethod('System.Reflection.MethodBase', 'GetMethodFromHandle', 1);
+    const fromHandle = onGeneric
+      ? this.findMethod('System.Reflection.MethodBase', 'GetMethodFromHandle', 2)
+      : this.findMethod('System.Reflection.MethodBase', 'GetMethodFromHandle', 1);
     const make = this.findMethod('System.Reflection.RuntimeMethodInfo', 'MakeGenericMethod', 1) || this.findMethod('System.Reflection.MonoMethod', 'MakeGenericMethod', 1);
     if (!fromHandle || !make) throw new Error('reflection (MethodBase.GetMethodFromHandle / MakeGenericMethod) is not available in this build');
-    const rmi = this.call(fromHandle, 0, defMi);
+    const rmi = onGeneric ? this.call(fromHandle, 0, defMi, k + this.layout.byval) : this.call(fromHandle, 0, defMi);
     const inst = this.call(make, rmi, this.typeArray(argTypes));
     const f = this.allFields(this.klassOf(inst)).find((x) => x.name === 'mhandle');
     if (!f) throw new Error('RuntimeMethodInfo.mhandle not found');
     const mi = this.mem.u32At(inst + f.offset);
     const d = this.miDesc(mi, meta);
-    d.label = `${this.tdFullName(declTd)}::${meta.name}<${argTypes.map((t) => this.typeName(t)).join(', ')}>`;
+    d.label = `${onGeneric ? this.klassName(k) : this.tdFullName(declTd)}::${meta.name}<${argTypes.map((t) => this.typeName(t)).join(', ')}>`;
     if (!d.ptr) throw new Error(`${d.label} has no code in this build (that instantiation was never compiled)`);
     this._ginfl.set(key, d);
     return d;
@@ -893,7 +940,13 @@ export class Il2Cpp {
       if (m.valid(p) && m.u32At(p) === f0 && m.u32At(p + 8) === K) { L.fields = o; break; }
     }
     if (L.fields === undefined) throw new Error('Il2CppClass.fields not found');
+    // FieldInfo { name, type, parent, offset, [customAttributeIndex (v24.0)], token }: find the stride from field 1's name
     L.fieldInfoSize = 20;
+    if (strFields.length > 1) {
+      const arr = m.u32At(K + L.fields);
+      const n1 = md.strAddr(strFields[1].nameIndex);
+      for (const size of [20, 24, 16]) if (m.u32At(arr + size) === n1) { L.fieldInfoSize = size; break; }
+    }
     // static_fields -> String.Empty is a zero-length string
     const empty = this.runtimeFields(K).find((f) => f.name === 'Empty' && f.isStatic);
     for (let o = L.fields; o < 260 && empty; o += 4) {
@@ -939,6 +992,8 @@ export class Il2Cpp {
         if (!m.valid(pp)) continue;
         const p0 = this.params(meta)[0];
         if (m.u32At(pp) === p0.type) { L.mi.paramStride = 4; L.mi.paramType = 0; break; }
+        // v24.0 (Unity 2018.1/2018.2): ParameterInfo still has a customAttributeIndex before the type
+        if (m.u32At(pp) === md.strAddr(p0.nameIndex) && m.u32At(pp + 16) === p0.type && m.u32At(pp + 12) !== p0.type) { L.mi.paramStride = 20; L.mi.paramType = 16; break; }
         if (m.u32At(pp + 12) === p0.type || m.u32At(pp) === md.strAddr(p0.nameIndex)) { L.mi.paramStride = 16; L.mi.paramType = 12; break; }
       }
     }
@@ -977,16 +1032,28 @@ export class Il2Cpp {
     }
     // generic instance: the byval type is GENERICINST -> definition
     const td = this.tdOfType(k + L.byval);
-    return td;
+    if (td >= 0 || L.name === undefined) return td;
+    // String, Object, int…: their byval type is a primitive kind; go by the class's name
+    this._tdByName ||= new Map();
+    if (this._tdByName.has(k)) return this._tdByName.get(k);
+    let r = -1;
+    try {
+      const n = m.cstr(m.u32At(k + L.name), 256);
+      const ns = m.cstr(m.u32At(k + L.namespace), 256);
+      r = this.findType(ns ? `${ns}.${n}` : n);
+    } catch (_) { /* not a class */ }
+    this._tdByName.set(k, r);
+    return r;
   }
 
   /** Il2CppClass* for a type definition if the runtime has created it, else 0. */
   klassOfTd(td) {
-    if (this.classTable) return this.mem.u32At(this.classTable + td * 4);
+    if (this.classTable && td >= 0 && td < this.md.typeCount) return this.mem.u32At(this.classTable + td * 4);
     return 0;
   }
 
   klassName(k, full = true) {
+    if (!k || !this.mem.valid(k)) return '?';
     const L = this.layout;
     return this.typeName(k + L.byval, full);
   }
@@ -1017,7 +1084,7 @@ export class Il2Cpp {
         type,
         attrs,
         offset: m.i32At(p + 12),
-        token: m.u32At(p + 16),
+        token: m.u32At(p + L.fieldInfoSize - 4),
         isStatic: (attrs & FIELD.STATIC) !== 0,
         isConst: (attrs & FIELD.LITERAL) !== 0,
         klass: k,
@@ -1078,6 +1145,12 @@ export class Il2Cpp {
       }
     }
     if (ptr !== null) return new ManagedError('native exception ' + hex(ptr));
+    // native wasm exception handling: the thrown C++ object is the tag's payload
+    if (typeof WebAssembly.Exception === 'function' && e instanceof WebAssembly.Exception && this.cppTag) {
+      let p = null;
+      try { if (e.is(this.cppTag)) p = e.getArg(this.cppTag, 0); } catch (_) { /* other tag */ }
+      if (typeof p === 'number') return this._wrapError(p);
+    }
     if (e instanceof WebAssembly.RuntimeError) return new ManagedError('wasm trap: ' + e.message, { trap: true });
     return e instanceof Error ? e : new Error(String(e));
   }
@@ -1134,6 +1207,10 @@ export class Il2Cpp {
     if (depth > 8) return null;
     const inst = this.fieldsOf(td).filter((f) => !(f.attrs & FIELD.STATIC) && !(f.attrs & FIELD.LITERAL));
     if (inst.length !== 1) return null;
+    // explicit Size / fixed buffers: the struct is bigger than its one field, so it's an aggregate
+    const vs = this.valueSize(td);
+    const fsz = this.sizeOfType(inst[0].type);
+    if (vs && fsz && vs > fsz) return null;
     const ft = this.typeInfo(inst[0].type);
     if (ft.kind === T.VALUETYPE) {
       const ftd = this._tdFromData(ft.data);
@@ -1145,7 +1222,7 @@ export class Il2Cpp {
     if (ft.kind === T.R4) return { wasm: 'f32' };
     if (ft.kind === T.R8) return { wasm: 'f64' };
     if (ft.kind === T.GENERICINST || ft.kind === T.VAR) return null;
-    return { wasm: 'i32' };
+    return ft.kind === T.BOOLEAN ? { wasm: 'i32', bool: true } : { wasm: 'i32' };
   }
 
   /** Can this method be called directly? Returns null or a reason string. */
@@ -1185,6 +1262,7 @@ export class Il2Cpp {
     const isStatic = d.isStatic;
     const ret = this.abi(d.retType, true);
     const f = this.fn(ptr);
+    if (typeof f !== 'function') throw new Error(`${d.name}: table slot ${ptr} holds no function`);
     const list = [];
     let retAddr = 0;
     if (ret.wasm === 'ptr') {
@@ -1192,7 +1270,7 @@ export class Il2Cpp {
       this.mem.fill(retAddr, 0, ret.size);
       list.push(retAddr);
     }
-    if (this.hasThis(d)) list.push(isStatic ? 0 : self >>> 0);
+    if (this.hasThis(d)) list.push(isStatic ? 0 : (this.boxedThis(d) ? self - 8 : self) >>> 0);
     list.push(...args);
     list.push(d.mi >>> 0); // const MethodInfo* (needed by shared generic code)
     let cs = null;
@@ -1256,16 +1334,25 @@ export class Il2Cpp {
     const a = this.abi(p);
     const m = this.mem;
     if (a.byref) {
-      const inner = this.typeInfo(p);
-      const size = Math.max(8, PRIM_SIZE[inner.kind] || (inner.kind === T.VALUETYPE ? this.valueSize(this._tdFromData(inner.data)) : 4));
+      // big enough for the pointee, generic structs (KeyValuePair<long,long>, Nullable<Vector3>…) included
+      const size = Math.max(8, this.sizeOfType(p, true));
       const buf = this.malloc(size);
       temps.push(buf);
       m.fill(buf, 0, size);
       if (v != null) this.writeValue(buf, p, v, true);
       return buf;
     }
+    if (a.enumOf !== undefined && typeof v === 'string') v = this.enumValue(a.td, v);
+    if (a.single && v && typeof v === 'object') { // one-scalar struct given as {field: x}
+      const f = this.fieldsOf(a.td).find((x) => !(x.attrs & FIELD.STATIC) && !(x.attrs & FIELD.LITERAL));
+      if (f) {
+        const x = fieldOf(v, f.name);
+        // nested one-field structs ({ _ticks: { … } }) unwrap recursively through the field's own type
+        v = x && typeof x === 'object' ? this._unwrapSingle(f.type, x) : x;
+      }
+    }
     switch (a.wasm) {
-      case 'i64': return BigInt.asIntN(64, BigInt(v ?? 0));
+      case 'i64': return BigInt.asIntN(64, BigInt(typeof v === 'boolean' ? +v : v ?? 0));
       case 'f32': case 'f64': return Number(v ?? 0);
       case 'ptr': {
         const buf = this.malloc(Math.max(a.size, 8));
@@ -1282,16 +1369,40 @@ export class Il2Cpp {
       }
       case 'i32':
       default: {
-        if (a.single && v && typeof v === 'object') { // single-field struct given as {field: x}
-          const f = this.fieldsOf(a.td).find((x) => !(x.attrs & FIELD.STATIC));
-          v = v[f.name];
-        }
         if (a.kind === T.STRING && typeof v === 'string') return this.newString(v);
+        if (a.kind === T.BOOLEAN || (a.single && a.single.bool)) return toBool(v) ? 1 : 0;
         if (typeof v === 'boolean') return v ? 1 : 0;
         if (typeof v === 'string' && a.kind === T.CHAR) return v.charCodeAt(0) || 0;
+        if (typeof v === 'bigint') return Number(BigInt.asIntN(32, v));
         return Number(v ?? 0) | 0;
       }
     }
+  }
+
+  /** The scalar inside a (nested) one-field struct value given as an object. */
+  _unwrapSingle(p, v, depth = 0) {
+    const t = this.typeInfo(p);
+    if (depth > 8 || t.kind !== T.VALUETYPE || !v || typeof v !== 'object') return v;
+    const td = this._tdFromData(t.data);
+    if (this.md.typeDef(td).isEnum) return v;
+    const f = this.fieldsOf(td).find((x) => !(x.attrs & FIELD.STATIC) && !(x.attrs & FIELD.LITERAL));
+    return f ? this._unwrapSingle(f.type, fieldOf(v, f.name), depth + 1) : v;
+  }
+
+  /** Enum member value from a name: 'Space', 'KeyCode.Space', 'A | B' (flags). */
+  enumValue(td, name) {
+    const parts = String(name).split('|').map((x) => x.trim().replace(/^.*\./, '')).filter(Boolean);
+    const members = this.enumMembers(td);
+    let acc = null;
+    for (const part of parts) {
+      const hit = members.find(([n]) => n === part) || members.find(([n]) => n.toLowerCase() === part.toLowerCase());
+      if (!hit) throw new TypeError(`${this.tdFullName(td)} has no member ${part}`);
+      const v = hit[1];
+      if (acc === null) acc = v;
+      else acc = typeof acc === 'bigint' || typeof v === 'bigint' ? BigInt(acc) | BigInt(v) : (acc | v);
+    }
+    if (acc === null) throw new TypeError(`${this.tdFullName(td)}: no member name given`);
+    return acc;
   }
 
   unmarshalReturn({ value, retAddr, ret, retType }) {
@@ -1301,6 +1412,8 @@ export class Il2Cpp {
       this.free(retAddr);
       return out;
     }
+    // enums come back like their underlying type (a uint enum with bit 31 set stays positive)
+    if (ret.enumOf !== undefined) return this.unmarshalReturn({ value, ret: { ...ret, kind: ret.enumOf, enumOf: undefined } });
     switch (ret.kind) {
       case T.BOOLEAN: return (value & 0xff) !== 0;
       case T.U1: return value & 0xff;
@@ -1308,11 +1421,13 @@ export class Il2Cpp {
       case T.CHAR: return String.fromCharCode(value & 0xffff);
       case T.U2: return value & 0xffff;
       case T.I2: return (value << 16) >> 16;
-      case T.U4: case T.U: return value >>> 0;
+      case T.U4: case T.U: case T.I: case T.PTR: case T.FNPTR: return value >>> 0; // same as field reads
+      case T.I8: return typeof value === 'bigint' ? BigInt.asIntN(64, value) : value;
+      case T.U8: return typeof value === 'bigint' ? BigInt.asUintN(64, value) : value;
       case T.STRING: return this.readString(value >>> 0);
       case T.VALUETYPE:
         if (ret.single) {
-          const f = this.fieldsOf(ret.td).find((x) => !(x.attrs & FIELD.STATIC));
+          const f = this.fieldsOf(ret.td).find((x) => !(x.attrs & FIELD.STATIC) && !(x.attrs & FIELD.LITERAL));
           return { [f.name]: ret.wasm === 'i32' && f && this.typeInfo(f.type).kind === T.BOOLEAN ? !!value : value };
         }
         return value;
@@ -1396,34 +1511,36 @@ export class Il2Cpp {
     const t = this.typeInfo(p);
     const kind = t.kind;
     switch (kind) {
-      case T.BOOLEAN: return m.setU8(addr, v === true || v === 'true' || v === 1 || v === '1' ? 1 : 0);
-      case T.CHAR: return m.setU16(addr, typeof v === 'string' ? v.charCodeAt(0) || 0 : Number(v));
+      case T.BOOLEAN: return m.setU8(addr, toBool(v) ? 1 : 0);
+      case T.CHAR: return m.setU16(addr, typeof v === 'string' ? v.charCodeAt(0) || 0 : Number(v ?? 0));
       case T.I1: return m.setI8(addr, Number(v));
       case T.U1: return m.setU8(addr, Number(v));
       case T.I2: return m.setI16(addr, Number(v));
       case T.U2: return m.setU16(addr, Number(v));
       case T.I4: return m.setI32(addr, Number(v));
       case T.U4: case T.I: case T.U: case T.PTR: return m.setU32(addr, Number(v));
-      case T.I8: return m.setI64(addr, v);
-      case T.U8: return m.setU64(addr, v);
-      case T.R4: return m.setF32(addr, Number(v));
-      case T.R8: return m.setF64(addr, Number(v));
+      case T.I8: return m.setI64(addr, v ?? 0);
+      case T.U8: return m.setU64(addr, v ?? 0);
+      case T.R4: return m.setF32(addr, Number(v ?? 0));
+      case T.R8: return m.setF64(addr, Number(v ?? 0));
       case T.STRING: return m.setU32(addr, typeof v === 'string' ? this.newString(v) : Number(v ?? 0));
       case T.VALUETYPE: {
         const td = this._tdFromData(t.data);
         const d = this.md.typeDef(td);
-        if (d.isEnum) return this.writeValue(addr, this.typePtr(d.elementTypeIndex), v, raw);
+        if (d.isEnum) return this.writeValue(addr, this.typePtr(d.elementTypeIndex), typeof v === 'string' ? this.enumValue(td, v) : v, raw);
         if (typeof v === 'number') return m.copy(addr, v, this.valueSize(td));
+        if (v == null) return m.fill(addr, 0, this.valueSize(td));
         return this.writeStruct(addr, td, v);
       }
       case T.GENERICINST: {
-        const fs = this.fieldsOfStructType(p);
-        if (fs) {
+        if (this._isValueGeneric(p)) {
+          const fs = this.fieldsOfStructType(p);
+          if (!fs) throw new Error(`can't write ${this.typeName(p)}: its runtime class isn't set up`);
           if (typeof v === 'number') return m.copy(addr, v, this.sizeOfType(p));
-          for (const f of fs) if (v && v[f.name] !== undefined) this.writeValue(addr + f.offset, f.type, v[f.name]);
+          for (const f of fs) { const x = v ? fieldOf(v, f.name) : undefined; if (x !== undefined) this.writeValue(addr + f.offset, f.type, x); }
           return undefined;
         }
-        return m.setU32(addr, Number(v ?? 0));
+        return m.setU32(addr, Number(v ?? 0)); // a reference: an object pointer (or 0)
       }
       default: return m.setU32(addr, Number(v ?? 0));
     }
@@ -1436,10 +1553,16 @@ export class Il2Cpp {
     return this.mem.u32At(t.data + 12); // { type, context { class_inst, method_inst }, cached_class }
   }
 
-  /** Inline size of a value of type p (references are 4). */
-  sizeOfType(p) {
+  /** Is this GENERICINST a struct (KeyValuePair<,>, Nullable<>…) rather than a class? */
+  _isValueGeneric(p) {
+    const b = this.tdOfType(p);
+    return b >= 0 && this.md.typeDef(b).isValueType;
+  }
+
+  /** Inline size of a value of type p (references are 4). With `deref`, a byref type's pointee size. */
+  sizeOfType(p, deref = false) {
     const t = this.typeInfo(p);
-    if (t.byref) return 4;
+    if (t.byref && !deref) return 4;
     if (t.kind === T.VALUETYPE) {
       const td = this._tdFromData(t.data);
       const d = this.md.typeDef(td);
@@ -1447,8 +1570,7 @@ export class Il2Cpp {
       return this.valueSize(td);
     }
     if (t.kind === T.GENERICINST) {
-      const b = this.tdOfType(p);
-      if (b >= 0 && this.md.typeDef(b).isValueType) { const k = this.cachedClass(p); return k ? this.klassValueSize(k) : 0; }
+      if (this._isValueGeneric(p)) { const k = this.cachedClass(p) || (deref ? this.klassOfType(p) : 0); return k ? this.klassValueSize(k) : 0; }
       return 4;
     }
     return PRIM_SIZE[t.kind] || 4;
@@ -1481,6 +1603,8 @@ export class Il2Cpp {
     const t = this.typeInfo(p);
     if (t.kind === T.VALUETYPE) return this.structFields(this._tdFromData(t.data));
     if (t.kind === T.GENERICINST) {
+      // only generic *structs* have inline fields; List<T>, Action<T>… are references
+      if (!this._isValueGeneric(p)) return null;
       const k = this.cachedClass(p);
       if (!k) return null;
       return this.allFields(k).filter((f) => !f.isStatic && !f.isConst).map((f) => ({ ...f, offset: f.offset - 8 }));
@@ -1520,7 +1644,7 @@ export class Il2Cpp {
   }
 
   writeStruct(addr, td, obj) {
-    for (const f of this.structFields(td)) if (obj[f.name] !== undefined) this.writeValue(addr + f.offset, f.type, obj[f.name]);
+    for (const f of this.structFields(td)) { const x = fieldOf(obj, f.name); if (x !== undefined) this.writeValue(addr + f.offset, f.type, x); }
   }
 
   /** Literal (const / enum member) value from metadata. */
@@ -1531,23 +1655,31 @@ export class Il2Cpp {
     const t = this.typeInfo(p);
     const m = this.mem;
     if (t.kind === T.STRING) {
-      // compressed length prefix (v29+) or int32 length
+      // v29+: compressed signed length (zigzag, -1 = null), as Il2CppDumper and il2cpp read it; before: int32
       let a = d.dataAddr;
       let len;
       if (this.md.version >= 29) {
-        const b = m.u8At(a);
-        if ((b & 0x80) === 0) { len = b; a += 1; }
-        else if ((b & 0xc0) === 0x80) { len = ((b & 0x3f) << 8) | m.u8At(a + 1); a += 2; }
-        else { len = ((b & 0x1f) << 24) | (m.u8At(a + 1) << 16) | (m.u8At(a + 2) << 8) | m.u8At(a + 3); a += 4; }
-        if (len === 0xffffffff >> 0 || len < 0) return null;
+        const n = this._compressedSize(a);
+        len = this._readCompressed(a, T.I4);
+        a += n;
       } else { len = m.i32At(a); a += 4; }
+      if (len < 0) return null;
+      len = Math.min(len, Math.max(0, m.size - a));
       return new TextDecoder().decode(m.bytes(a, len));
     }
-    if (this.md.version >= 29 && (t.kind === T.I4 || t.kind === T.U4 || t.kind === T.CHAR || t.kind === T.I2 || t.kind === T.U2 || t.kind === T.I8 || t.kind === T.U8)) {
-      // v29 stores these as compressed (zigzag for signed) varints
-      return this._readCompressed(d.dataAddr, t.kind);
-    }
+    // v29+ compresses only 32-bit integers (zigzag for signed); 8/16-bit and 64-bit values are stored plainly
+    if (this.md.version >= 29 && (t.kind === T.I4 || t.kind === T.U4)) return this._readCompressed(d.dataAddr, t.kind);
     return this.readValue(d.dataAddr, p);
+  }
+
+  /** Bytes taken by a compressed integer starting at a. */
+  _compressedSize(a) {
+    const b = this.mem.u8At(a);
+    if ((b & 0x80) === 0) return 1;
+    if ((b & 0xc0) === 0x80) return 2;
+    if ((b & 0xe0) === 0xc0) return 4;
+    if (b === 0xf0) return 5;
+    return 1; // 0xfe / 0xff
   }
 
   _readCompressed(a, kind) {
@@ -1563,12 +1695,11 @@ export class Il2Cpp {
     else if (b === 0xff) v = 0xffffffff;
     else v = 0;
     v >>>= 0;
-    if (kind === T.I4 || kind === T.I2) {
+    if (kind === T.I4) {
       // zigzag
       if (v === 0xffffffff) return -2147483648;
       return (v & 1) ? -((v >>> 1) + 1) : (v >>> 1);
     }
-    if (kind === T.CHAR) return String.fromCharCode(v);
     return v;
   }
 
@@ -1582,15 +1713,17 @@ export class Il2Cpp {
       all.push([f.name, v]);
       if (v == value || (typeof v === 'bigint' && BigInt(value) === v)) return f.name;
     }
-    // flags
-    const n = Number(value);
-    if (n > 0) {
+    // flags: BigInt maths, so bit 31 and 64-bit enums decompose too
+    let n;
+    try { n = BigInt.asUintN(64, BigInt(value)); } catch (_) { return null; }
+    if (n > 0n) {
       let rest = n;
       for (const [name, v] of all) {
-        const x = Number(v);
-        if (x && (rest & x) === x && (x & (x - 1)) === 0) { names.push(name); rest &= ~x; }
+        let x;
+        try { x = BigInt.asUintN(64, BigInt(v)); } catch (_) { continue; }
+        if (x && (rest & x) === x && (x & (x - 1n)) === 0n) { names.push(name); rest &= ~x; }
       }
-      if (names.length && rest === 0) return names.join(' | ');
+      if (names.length && rest === 0n) return names.join(' | ');
     }
     return null;
   }
@@ -1630,22 +1763,60 @@ export class Il2Cpp {
     return k || this.klassOfTd(td);
   }
 
-  /** Scan the heap for live objects whose class is exactly `k`. */
-  findInstances(k, { limit = 5000, validate } = {}) {
+  /**
+   * Scan the heap for live objects whose class is `k`, or (with `klasses`, a Set) any of those classes.
+   * See subKlasses() for "this class and everything derived from it".
+   */
+  findInstances(k, { limit = 5000, validate, klasses = null } = {}) {
+    limit = Number(limit);
+    if (Number.isNaN(limit)) limit = 5000;
+    if (limit <= 0) return [];
     const m = this.mem.views();
     const u32 = m.u32;
     const out = [];
-    const start = (this.reg.meta.addr + 0x100000) >>> 2;
+    const one = !klasses || klasses.size <= 1;
+    const want = one ? (klasses ? [...klasses][0] : k) : 0;
+    const start = Math.floor((this.reg.meta.addr + 0x100000) / 4);
     for (let i = start; i < u32.length - 2; i++) {
-      if (u32[i] !== k) continue;
+      const c = u32[i];
+      if (one ? c !== want : !klasses.has(c)) continue;
       const mon = u32[i + 1];
       if (mon !== 0 && (mon < 0x1000 || mon >= m.size)) continue;
-      const a = i << 2;
+      const a = i * 4; // i << 2 goes negative above 2 GiB
       if (validate && !validate(a)) continue;
       out.push(a);
       if (out.length >= limit) break;
     }
     return out;
+  }
+
+  /**
+   * Runtime classes that are `td` or derive from / implement it (classes the runtime has created).
+   * Generic instances aren't in the class table, so pass `extra` classes (e.g. the exact k) too.
+   */
+  subKlasses(td, extra = []) {
+    const out = new Set(extra.filter(Boolean));
+    if (!this.classTable || td < 0) return out;
+    const iface = this.md.typeDef(td).isInterface;
+    for (let i = 0; i < this.md.typeCount; i++) {
+      const k = this.klassOfTd(i);
+      if (!k) continue;
+      if (iface ? this.implementsTd(i, td) : this.isSubclassOf(i, td)) out.add(k);
+    }
+    return out;
+  }
+
+  /** Does type definition `td` (or a base) list interface `ifaceTd`? (metadata only; generic interfaces by definition) */
+  implementsTd(td, ifaceTd) {
+    for (const t of this.hierarchy(td)) {
+      if (t === ifaceTd) return true;
+      const d = this.md.typeDef(t);
+      for (let j = 0; j < d.interfacesCount; j++) {
+        const it = this.tdOfTypeIndex(this.md.interfaceType(d.interfacesStart + j));
+        if (it === ifaceTd) return true;
+      }
+    }
+    return false;
   }
 
   /** Il2CppObject boxed value -> address of its data. */

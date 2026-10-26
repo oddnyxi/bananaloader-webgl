@@ -250,13 +250,18 @@ declare class Banan {
   pref<T>(id: string, def: T, name?: string, o?: BananPrefOptions): BananPref<T>;
   patch(target: string | Il2CppMethodDesc, hooks: BananPatchHooks): BananPatch;
   unpatchAll(): void;
-  startCoroutine(gen: (() => Generator<any, any, any>) | Generator<any, any, any>): object;
+  /** Generators (sync or async) stepped once per frame. yield: nothing = next frame, a number = seconds, a Promise = until it settles, { frames: n }. */
+  startCoroutine(gen: (() => Generator<any, any, any> | AsyncGenerator<any, any, any>) | Generator<any, any, any> | AsyncGenerator<any, any, any>): object;
   stopCoroutine(c: object): void;
   createTab(name: string, o?: { icon?: string }): OdiumContainer;
   onKey(spec: string, fn: () => void): () => void;
   notify(text: string, type?: 'info' | 'success' | 'warn' | 'error'): void;
-  setInterval(fn: () => void, ms: number): number;
-  setTimeout(fn: () => void, ms: number): number;
+  /** Like window.setInterval, with `this` = the Banan; errors are logged, and it's cleared when the Banan unloads. */
+  setInterval(fn: (...args: any[]) => void, ms: number, ...args: any[]): number;
+  /** Like window.setTimeout, with `this` = the Banan; errors are logged, and it's cleared when the Banan unloads. */
+  setTimeout(fn: (...args: any[]) => void, ms: number, ...args: any[]): number;
+  clearInterval(id: number): void;
+  clearTimeout(id: number): void;
   /** API of a Banan declared with `// @require Name`. */
   require(name: string): any;
   /** API of a Banan declared with `// @optional Name`, or null. */

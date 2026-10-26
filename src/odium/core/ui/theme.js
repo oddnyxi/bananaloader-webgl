@@ -16,15 +16,21 @@ export function setAccent(hex) {
     s.setProperty('--on', 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2] > 160 ? '#000' : '#fff');
   }
   if (this._accentCtl) this._accentCtl.setValue(this.accent, true);
+  if (this._themeCtl) {
+    const name = Object.keys(THEMES).find((k) => THEMES[k].toLowerCase() === this.accent.toLowerCase());
+    this._themeCtl.setValue(name ?? -1, true);
+  }
   return this;
 }
 
 export function setTheme(name) {
-  if (THEMES[name]) this.setAccent(THEMES[name]);
+  if (Object.prototype.hasOwnProperty.call(THEMES, name)) this.setAccent(THEMES[name]);
   return this;
 }
 
 export function setOpacity(v) {
+  v = Number(v);
+  if (!Number.isFinite(v)) return this;
   this._opacity = Math.min(1, Math.max(0.3, v));
   if (this.win) this.win.style.opacity = this._opacity;
   if (this._opCtl) this._opCtl.setValue(Math.round(this._opacity * 100), true);
@@ -41,7 +47,8 @@ export function setWindowIcon(icon) {
   this._icon = icon === false ? false : icon || null;
   const lg = this.win && this.win.querySelector('.logo');
   if (!lg) return this;
-  const shown = this._icon === false ? null : this._icon || DEFAULT_LOGO;
+  const def = this._defaultIcon !== undefined ? this._defaultIcon || null : DEFAULT_LOGO;
+  const shown = this._icon === false ? null : this._icon || def;
   lg.innerHTML = '';
   lg.classList.remove('has-img');
   lg.classList.toggle('none', !shown);

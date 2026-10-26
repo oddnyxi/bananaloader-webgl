@@ -26,7 +26,17 @@ export class SceneView {
       rowHeight: 24,
       render: (it, r) => this.renderRow(it, r),
       onClick: (it, e) => this.click(it, e),
-      onKey: (it, e) => { if (it.node) { if (e.key === 'ArrowLeft') this.expanded.delete(it.node.go); else if (e.key === 'ArrowRight') this.expanded.add(it.node.go); else this.toggle(it.node); this.flatten(); } },
+      // arrows move through the tree; a group header is passed over, not toggled
+      onSelect: (it, e) => { if (it.node) this.click(it, e); },
+      onKey: (it, e) => {
+        if (it.group) {
+          const open = e.key === 'ArrowRight' ? true : e.key === 'ArrowLeft' ? false : it.closed;
+          if (!this.query) { this.groupOpen.set(it.key, open); this.flatten(); }
+          return;
+        }
+        if (e.key === 'ArrowLeft') this.expanded.delete(it.node.go); else if (e.key === 'ArrowRight') this.expanded.add(it.node.go); else this.toggle(it.node);
+        this.flatten();
+      },
     });
     this.inspector = new Inspector(app, {
       onSelectGameObject: (go, fromHistory) => this.select(go, !fromHistory),
@@ -63,8 +73,9 @@ export class SceneView {
     const hidden = [];
     for (const r of roots) {
       if (r.hideFlags) { hidden.push(r); continue; }
-      if (this.data.source.startsWith('Resources') && r.scene == null && r.active && r.activeInHierarchy === false) { prefabs.push(r); continue; }
-      const key = r.scene ?? 'scene';
+      // scene handle 0 is "no scene" (prefabs and assets), like a missing one
+      if (this.data.source.startsWith('Resources') && !r.scene && r.active && r.activeInHierarchy === false) { prefabs.push(r); continue; }
+      const key = r.scene || 'scene';
       if (!scenes.has(key)) scenes.set(key, []);
       scenes.get(key).push(r);
     }
@@ -139,6 +150,8 @@ export class SceneView {
 
   click(it, e) {
     if (it.group) {
+      // during a search every group is shown open; clicking then would store "closed" for later
+      if (this.query) return;
       this.groupOpen.set(it.key, it.closed);
       this.flatten();
       return;
@@ -153,15 +166,20 @@ export class SceneView {
   select(go, inspect = true) {
     if (!this.data || !this.data.byGo.has(go)) this.refresh();
     const n = this.data && this.data.byGo.get(go);
+    // show the tab first: a hidden list has no height to scroll in
+    this.app.focusTab('scene');
     if (n) {
-      for (let p = n.parent; p; p = p.parent) this.expanded.add(p.go);
+      let root = n;
+      for (let p = n.parent; p; p = p.parent) { this.expanded.add(p.go); root = p; }
       this.selected = go;
       if (this.query) { this.query = ''; this.search.value = ''; }
+      // open the group it's in (prefabs start collapsed; hidden objects need "show hidden")
+      if (root.hideFlags && !this.showHidden) { this.showHidden = true; this.hidBtn.classList.add('on'); this.hidBtn.innerHTML = I.eye; }
+      for (const g of this._groups()) if (g.list.includes(root)) this.groupOpen.set('g:' + g.title, true);
       this.flatten();
       const i = this.items.findIndex((x) => x.node === n);
       if (i >= 0) { this.list.sel = i; this.list.scrollToIndex(i); }
     }
     if (inspect) this.inspector.show({ kind: 'go', go });
-    this.app.focusTab('scene');
   }
 }

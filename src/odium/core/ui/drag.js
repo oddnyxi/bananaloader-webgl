@@ -1,7 +1,7 @@
 /** Drag the window by its header, with optional snapping to screen edges/centre. */
 export function enableDrag(ui, win, head) {
   head.addEventListener('pointerdown', (e) => {
-    if (e.target.closest('.wbtn')) return;
+    if (e.target.closest('.wbtn') || e.button !== 0) return;
     const r = win.getBoundingClientRect();
     const dx = e.clientX - r.left;
     const dy = e.clientY - r.top;
@@ -22,8 +22,12 @@ export function enableDrag(ui, win, head) {
     const up = () => {
       head.removeEventListener('pointermove', move);
       head.removeEventListener('pointerup', up);
+      head.removeEventListener('pointercancel', up);
+      head.removeEventListener('lostpointercapture', up);
     };
     head.addEventListener('pointermove', move);
     head.addEventListener('pointerup', up);
+    head.addEventListener('pointercancel', up);
+    head.addEventListener('lostpointercapture', up);
   });
 }

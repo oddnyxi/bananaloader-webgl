@@ -31,8 +31,10 @@ export function unityWebDataFiles(b) {
 export function metadataSize(b, at = 0) {
   const dv = new DataView(b.buffer, b.byteOffset + at, Math.min(0x200, b.byteLength - at));
   const headerSize = dv.getUint32(8, true);
+  // v38+ sections are (offset, size, count) triples; before, (offset, size) pairs
+  const stride = dv.getUint32(4, true) >= 38 ? 12 : 8;
   let end = headerSize;
-  for (let off = 8; off + 8 <= headerSize && off + 8 <= dv.byteLength; off += 8) {
+  for (let off = 8; off + 8 <= headerSize && off + 8 <= dv.byteLength; off += stride) {
     const o = dv.getUint32(off, true);
     const s = dv.getUint32(off + 4, true);
     if (o && o + s > end && o < 0x40000000) end = o + s;

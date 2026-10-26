@@ -443,8 +443,8 @@ export class Dumper {
         const out = [];
         out.push(`// Namespace: ${t.namespace}`);
         let decl = `${this._typeModifiers(t)} ${this._typeKeyword(t)} ${il.tdFullName(td).split('.').pop().replace(/^.*\+/, '')}`;
-        const short = il.tdShortName(td);
-        if (short.includes('<')) decl += short.slice(short.indexOf('<'));
+        // generic parameters only (compiler-generated names like <Start>d__5 already contain '<')
+        if (t.isGeneric) decl += '<' + md.genericParamNames(t.genericContainerIndex).join(', ') + '>';
         const bases = [];
         if (t.parentIndex >= 0 && !t.isValueType && !t.isEnum) {
           const p = il.typePtr(t.parentIndex);

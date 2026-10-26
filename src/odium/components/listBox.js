@@ -113,6 +113,7 @@ export function createListBox(text, items = [], action, o = {}) {
   };
 
   box.onkeydown = (e) => {
+    if (n.classList.contains('disabled')) return;
     const v = vis();
     if (!v.length) return;
     let i = v.indexOf(cursor);

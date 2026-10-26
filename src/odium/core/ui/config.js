@@ -16,6 +16,7 @@ export function exportConfig() {
 export function importConfig(json) {
   try {
     const d = typeof json === 'string' ? JSON.parse(json) : json;
+    if (!d || typeof d !== 'object' || Array.isArray(d)) return false;
     if (d.ui) {
       if (d.ui.accent) this.setAccent(d.ui.accent);
       if (d.ui.opacity != null) this.setOpacity(d.ui.opacity);
@@ -38,8 +39,9 @@ export function saveConfig(name = 'default') {
 
 export function loadConfig(name = 'default') {
   try {
+    // null: nothing saved; false: saved but unreadable
     const s = localStorage.getItem(STORAGE_PREFIX + name);
-    return s ? this.importConfig(s) : false;
+    return s ? this.importConfig(s) : null;
   } catch {
     return false;
   }

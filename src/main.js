@@ -14,7 +14,8 @@ installHooks();
 const loader = new BananaLoader();
 window.BananaLoader = loader.publicApi();
 
-const domReady = () => new Promise((r) => (document.body ? r() : document.addEventListener('DOMContentLoaded', () => r(), { once: true })));
+// a document can end up without a body (XML, or the page removed it): don't wait forever then
+const domReady = () => new Promise((r) => (document.body || document.readyState !== 'loading' ? r() : document.addEventListener('DOMContentLoaded', () => r(), { once: true })));
 
 loader.boot().then(async ({ Module }) => {
   await domReady();

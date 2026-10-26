@@ -9,6 +9,7 @@ export class VList {
    * @param {(item, ev: MouseEvent) => void} [o.onClick]
    * @param {(item, ev: MouseEvent) => void} [o.onContext]
    * @param {(item) => void} [o.onKey]  Enter on the focused row
+   * @param {(item, ev) => void} [o.onSelect]  arrow-key moves (default: onClick)
    */
   constructor(o) {
     this.o = o;
@@ -26,6 +27,7 @@ export class VList {
 
   setItems(items, keepScroll = true) {
     this.items = items;
+    if (this.sel >= items.length) this.sel = items.length - 1;
     if (!keepScroll) this.el.scrollTop = 0;
     this.spacer.style.height = items.length * this.rh + 'px';
     this.draw(true);
@@ -57,10 +59,13 @@ export class VList {
       r._i = i;
       r.className = 'ue-row';
       this.o.render(this.items[i], r, i);
+      if (i === this.sel) r.classList.add('cur'); // keyboard position
     }
   }
 
   scrollToIndex(i) {
+    // hidden (tab or window not shown): scroll once it has a size
+    if (!this.el.clientHeight) { if (!this._pend) { this._pend = true; requestAnimationFrame(() => { this._pend = false; if (this.el.clientHeight) this.scrollToIndex(i); }); } return; }
     const y = i * this.rh;
     if (y < this.el.scrollTop || y + this.rh > this.el.scrollTop + this.el.clientHeight) this.el.scrollTop = y - this.el.clientHeight / 2;
     this.draw(true);
@@ -69,13 +74,19 @@ export class VList {
   _key(e) {
     if (!this.items.length) return;
     let i = this.sel;
-    if (e.key === 'ArrowDown') i = Math.min(this.items.length - 1, i + 1);
-    else if (e.key === 'ArrowUp') i = Math.max(0, i - 1);
-    else if (e.key === 'Enter' || e.key === 'ArrowRight' || e.key === 'ArrowLeft') { this.o.onKey && this.o.onKey(this.items[i], e); e.preventDefault(); return; }
-    else return;
+    const valid = i >= 0 && i < this.items.length;
+    if (e.key === 'ArrowDown') i = valid ? Math.min(this.items.length - 1, i + 1) : 0;
+    else if (e.key === 'ArrowUp') i = valid ? Math.max(0, i - 1) : 0;
+    else if (e.key === 'Enter' || e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      e.preventDefault();
+      if (valid && this.o.onKey) this.o.onKey(this.items[i], e);
+      return;
+    } else return;
     e.preventDefault();
     this.sel = i;
-    this.o.onClick && this.o.onClick(this.items[i], e);
+    const fn = this.o.onSelect || this.o.onClick;
+    if (fn) fn(this.items[i], e);
     this.scrollToIndex(i);
+    this.draw(true);
   }
 }

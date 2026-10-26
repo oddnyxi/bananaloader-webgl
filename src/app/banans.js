@@ -2,7 +2,7 @@
 import { h, icon } from '../ui/dom.js';
 import { B } from './brand.js';
 
-const ORIGIN = { file: ['File', B.file], url: ['URL', B.url], editor: ['Editor', B.code], folder: ['Folder', B.folder], example: ['Example', B.banana] };
+const ORIGIN = { registry: ['bananaloader.com', B.download], file: ['File', B.file], url: ['URL', B.url], editor: ['Editor', B.code], folder: ['Folder', B.folder], example: ['Example', B.banana] };
 
 export class BanansView {
   constructor(app) {
@@ -53,10 +53,12 @@ export class BanansView {
 
   async fromUrl() {
     const url = await this.app.ui.prompt('Install a Banan from a URL (raw .js file):', { title: 'Install from URL', placeholder: 'https://…/my-banan.js' });
-    if (!url) return;
+    const u = String(url || '').trim();
+    if (!u) return;
     try {
-      const e = await this.loader.installFromUrl(url.trim());
-      this.app.notify(`Installed ${e.info.name}`, 'success');
+      const e = await this.loader.installFromUrl(u);
+      if (e.state === 'error') this.app.notify(`Installed ${e.info.name}, but it failed to load: ${e.error || 'see Console'}`, 'error', 5000);
+      else this.app.notify(`Installed ${e.info.name}`, 'success');
     } catch (err) { this.app.notify(`Couldn't download: ${err.message || err}`, 'error', 5000); }
   }
 
@@ -70,7 +72,13 @@ export class BanansView {
     if (this._perm === 'prompt') m.addButton('Reconnect folder', () => this.syncFolder(true), { icon: B.link });
     if (this._perm === 'granted') m.addButton('Reload from folder', () => this.syncFolder(false), { icon: B.sync });
     m.addButton(dir ? 'Link a different folder…' : 'Link a Banans folder…', () => this.linkFolder(), { icon: B.folder });
-    if (dir) { m.addSeparator(); m.addButton('Unlink folder', async () => { await st.unlinkFolder(); for (const e of [...this.loader.entries.values()]) if (e.rec.origin === 'folder') { this.loader.unload(e); this.loader.entries.delete(e.id); } this.render(); this._folderState(); }, { danger: true }); }
+    if (dir) { m.addSeparator(); m.addButton('Unlink folder', async () => {
+      await st.unlinkFolder();
+      // remove() unloads, drops the entry and tells every view (console sources, editor list)
+      for (const e of [...this.loader.entries.values()]) if (e.rec.origin === 'folder') await this.loader.remove(e);
+      this.render();
+      this._folderState();
+    }, { danger: true }); }
     const r = this.folderBtn.getBoundingClientRect();
     this.app.ui.contextMenu(m, r.left, r.bottom + 4);
   }
@@ -109,7 +117,7 @@ export class BanansView {
     for (const e of list) this.list.append(this.card(e));
     const loaded = all.filter((e) => e.state === 'loaded').length;
     const errors = all.filter((e) => e.state === 'error').length;
-    this.summary.textContent = `${all.length} installed · ${loaded} running${errors ? ` · ${errors} failed` : ''}${L.settings.safeMode ? ' · SAFE MODE' : ''}`;
+    this.summary.textContent = `${all.length} installed · ${loaded} running${errors ? ` · ${errors} failed` : ''}${L.safeMode ? ' · SAFE MODE' : ''}`;
   }
 
   card(e) {
@@ -122,18 +130,28 @@ export class BanansView {
     const [oname, oico] = ORIGIN[e.rec.origin] || ORIGIN.file;
     const patches = e.instance ? L.patcher.list().filter((p) => p.owner === e.instance).length : 0;
     const cat = e.instance && L.prefs.getCategory(e.id);
-    const prefs = cat ? cat.entries.size : 0;
+    const prefs = cat ? [...cat.entries.values()].filter((p) => !p.hidden).length : 0;
     let status;
-    if (L.settings.safeMode) status = h('span.bl-st.dim', 'Safe mode');
+    if (L.safeMode) status = h('span.bl-st.dim', 'Safe mode');
     else if (e.state === 'loaded') status = h('span.bl-st.ok', 'Running');
     else if (e.state === 'error') status = h('span.bl-st.err', 'Failed');
     else if (e.state === 'skipped') status = h('span.bl-st.dim', 'Other game');
     else status = h('span.bl-st.dim', on ? 'Waiting' : 'Disabled');
     const actions = h('div.bl-actions',
-      h('button.ue-ib', { title: 'Reload', html: B.refresh, disabled: !on, on: { click: () => { L.reload(e); this.app.notify(`${info.name} reloaded`, 'success', 1500); } } }),
+      h('button.ue-ib', { title: 'Reload', html: B.refresh, disabled: !on, on: { click: () => {
+        const ok = L.reload(e);
+        if (ok === false && e.state === 'error') this.app.notify(`${info.name} failed to load: ${e.error || 'see Console'}`, 'error', 4000);
+        else this.app.notify(`${info.name} reloaded`, 'success', 1500);
+      } } }),
       h('button.ue-ib', { title: 'Edit', html: B.edit, on: { click: () => this.app.editor.open(e) } }),
       prefs ? h('button.ue-ib', { title: 'Preferences', html: B.sliders, on: { click: () => this.app.showPrefs(e.id) } }) : null,
-      e.rec.url ? h('button.ue-ib', { title: 'Update from URL', html: B.download, on: { click: async () => { try { await L.updateFromUrl(e); this.app.notify(`${info.name} updated`, 'success'); } catch (err) { this.app.notify(err.message, 'error'); } } } }) : null,
+      e.rec.url ? h('button.ue-ib', { title: 'Update from URL', html: B.download, on: { click: async () => {
+        try {
+          await L.updateFromUrl(e);
+          if (e.state === 'error') this.app.notify(`${e.info.name} updated, but it failed to load: ${e.error || 'see Console'}`, 'error', 5000);
+          else this.app.notify(`${e.info.name} updated`, 'success');
+        } catch (err) { this.app.notify(err.message, 'error'); }
+      } } }) : null,
       h('button.ue-ib', { title: 'Export .js', html: B.upload, on: { click: () => this.app.download(`${e.id.replace(/^folder:/, '').replace(/\.js$/, '')}.js`, e.rec.source) } }),
       e.rec.origin === 'folder' ? null : h('button.ue-ib', { title: 'Delete', html: B.trash, on: { click: () => this.remove(e) } }));
     const tile = h('div.bl-tile', { html: info.type === 'plugin' ? B.plugin : B.banana, style: { color: info.color, background: hexA(info.color, 0.12), borderColor: hexA(info.color, 0.35) } });

@@ -88,7 +88,7 @@ export class Inspector {
       if (t.kind === 'static') return this.il.tdShortName(t.td);
       if (t.kind === 'obj') {
         const k = this.il.klassOf(t.ptr);
-        if (this.unity.isUnityObject(t.ptr)) return this.unity.name(t.ptr) ? `${this.il.klassName(k, false)}` : this.il.klassName(k, false);
+        if (this.unity.isUnityObject(t.ptr)) { const nm = this.unity.name(t.ptr); return nm ? `${nm} (${this.il.klassName(k, false)})` : this.il.klassName(k, false); }
         return this.il.klassName(k, false);
       }
     } catch (_) { /* fall through */ }
@@ -140,6 +140,9 @@ export class Inspector {
       else this._renderStatic(t);
     } catch (e) {
       console.error('[UnityExplorer]', e);
+      // nothing half-built may keep running or show the previous object's tabs
+      this.updaters = [];
+      this.tabs.replaceChildren();
       this.body.replaceChildren(h('div.ue-note.warn', { html: `<b>Couldn't inspect this.</b><br>${esc(e.message || e)}` }));
     }
   }
@@ -149,6 +152,8 @@ export class Inspector {
     const t = this.target;
     if (!t) return;
     if (!this._valid(t)) { this.render(); return; }
+    // rows that were collapsed or replaced stop updating (and are dropped)
+    this.updaters = this.updaters.filter((u) => !u.cell || u.cell.isConnected);
     for (const u of this.updaters) {
       try { u(); } catch (_) { /* keep going */ }
     }
@@ -164,7 +169,7 @@ export class Inspector {
   }
 
   _addrChip(p) {
-    return h('span.chip.click.ue-addr', { title: 'Copy address', on: { click: () => { copy(hexAddr(p)); this.app.ui.notify('Address copied', 'success', 1200); } } }, icon(I.copy, 'i'), hexAddr(p));
+    return h('span.chip.click.ue-addr', { title: 'Copy address', on: { click: async () => { const ok = await copy(hexAddr(p)); this.app.ui.notify(ok ? 'Address copied' : 'Couldn\'t copy: the page blocks the clipboard', ok ? 'success' : 'error', 1500); } } }, icon(I.copy, 'i'), hexAddr(p));
   }
 
   _typeChip(td, text) {
@@ -313,20 +318,36 @@ export class Inspector {
         if (!set) inp.readOnly = true;
         return [ax, inp];
       });
-      const read = () => {
+      const shown = {}; // the text each input got from the last read
+      const read = (force) => {
         let v;
         try { v = il.call(get, tr); } catch (_) { return; }
-        for (const [ax, inp] of ins) if (document.activeElement !== inp && this.app.shadowActive() !== inp) inp.value = fmtNumber(v[ax], T.R4);
+        for (const [ax, inp] of ins) {
+          if (!force && (document.activeElement === inp || this.app.shadowActive() === inp)) continue;
+          inp.value = shown[ax] = fmtNumber(v[ax], T.R4);
+        }
       };
+      // only the axes the user edited change; the others keep their full precision
       const write = () => {
-        const v = {};
-        for (const [ax, inp] of ins) v[ax] = Number(inp.value) || 0;
-        try { il.call(set, tr, v); } catch (e) { this._err(e); }
-        read();
+        let v;
+        try { v = il.call(get, tr); } catch (e) { this._err(e); return; }
+        let changed = false;
+        for (const [ax, inp] of ins) {
+          if (inp.value === shown[ax]) continue;
+          const x = Number(String(inp.value).trim().replace(',', '.'));
+          if (String(inp.value).trim() === '' || !Number.isFinite(x)) { this.app.ui.notify(`${label} ${ax.toUpperCase()}: "${inp.value}" isn't a number`, 'error'); read(true); return; }
+          v[ax] = x;
+          changed = true;
+        }
+        if (changed) { try { il.call(set, tr, { x: v.x, y: v.y, z: v.z }); } catch (e) { this._err(e); } }
+        read(true);
       };
-      for (const [, inp] of ins) {
-        inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { write(); inp.blur(); } });
-        inp.addEventListener('change', write);
+      if (set) {
+        for (const [, inp] of ins) {
+          inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { write(); inp.blur(); } else if (e.key === 'Escape') { read(true); inp.blur(); } });
+          // after Enter the inputs already show the written value, so the blur's change event finds nothing to write
+          inp.addEventListener('change', write);
+        }
       }
       read();
       this.updaters.push(read);
@@ -467,7 +488,7 @@ export class Inspector {
       try { v = il.constValue(f.metaIndex); } catch (_) { /* ignore */ }
       const tt = il.typeInfo(f.type);
       let text = v == null ? 'null' : typeof v === 'string' && tt.kind === T.STRING ? JSON.stringify(v) : String(v);
-      if (tt.kind === T.VALUETYPE) { const etd = il._tdFromData(tt.data); if (il.md.typeDef(etd).isEnum) text = `${f.name} (${v})`; }
+      if (tt.kind === T.VALUETYPE) { const etd = il._tdFromData(tt.data); if (il.md.typeDef(etd).isEnum) { let en = null; try { en = il.enumName(etd, v); } catch (_) { /* not a member */ } text = `${en || f.name} (${v})`; } }
       val.append(h('span.v-txt.v-num', { text, title: text }));
       return out;
     }
@@ -505,11 +526,12 @@ export class Inspector {
    */
   _valueCell(cell, spec) {
     const { il, fmt } = this;
-    let desc;
-    try { desc = spec.read(); } catch (e) { cell.replaceChildren(h('span.v-err', { text: e.message || String(e), title: e.message })); return; }
+    let desc = null;
     let input = null;
     let lastText = null;
+    let expanded = false; // the expander's state survives rebuilds
     const writable = !!spec.write && !spec.readonly;
+    const showErr = (e) => { input = null; lastText = null; cell.replaceChildren(h('span.v-err', { text: e.message || String(e), title: e.message })); };
 
     const commit = (text) => {
       try {
@@ -558,7 +580,8 @@ export class Inspector {
         if (!writable) input.readOnly = true;
         input.addEventListener('input', () => input.classList.add('dirty'));
         input.addEventListener('keydown', (e) => {
-          if (e.key === 'Enter') { commit(input.value); input.blur(); }
+          // dirty goes first so the blur that follows doesn't commit the same text again
+          if (e.key === 'Enter') { const el = input; el.classList.remove('dirty'); commit(el.value); el.blur(); }
           if (e.key === 'Escape') { input.classList.remove('dirty', 'bad'); refresh(true); input.blur(); }
         });
         input.addEventListener('blur', () => { if (input && input.classList.contains('dirty')) commit(input.value); });
@@ -576,25 +599,31 @@ export class Inspector {
         cell.append(h('span.v-dim', desc.text));
       }
       if (writable && (desc.isRef && desc.refKind !== T.STRING)) {
-        cell.append(h('button.mini-ib', { title: 'Set reference (null or @address)', html: I.edit, on: { click: () => this._editRef(cell, commit, desc) } }));
+        cell.append(h('button.mini-ib', { title: 'Set reference (null or @address)', html: I.edit, on: { click: () => this._editRef(cell, commit, desc, () => build()) } }));
       }
       // expanders
       const canExpand = (k === 'struct' && (desc.addr || desc.raw)) || (k === 'object' && fmt.elements(desc.ref, 0) != null);
       if (canExpand && spec.sub && (spec.depth || 0) < 4) {
         const ex = h('span.v-exp', { html: I.chevR, title: 'Expand' });
-        ex.onclick = () => {
-          const open = !ex.classList.contains('open');
+        const toggle = (open) => {
+          expanded = open;
           ex.classList.toggle('open', open);
           spec.sub.replaceChildren();
           if (open) this._expand(spec.sub, spec.type, desc, (spec.depth || 0) + 1, spec);
         };
+        ex.onclick = () => toggle(!expanded);
         cell.prepend(ex);
-      }
+        // rebuilt while open: struct rows read live from memory and stay; anything else is re-expanded
+        if (expanded) {
+          if (k === 'struct' && desc.addr && spec.sub.childElementCount) ex.classList.add('open');
+          else toggle(true);
+        }
+      } else if (expanded && spec.sub) { expanded = false; spec.sub.replaceChildren(); }
     };
 
     const refresh = (force) => {
       let d;
-      try { d = spec.read(); } catch (e) { cell.replaceChildren(h('span.v-err', { text: e.message || String(e) })); return; }
+      try { d = spec.read(); } catch (e) { showErr(e); return; }
       const sig = d.kind + '|' + d.text + '|' + (d.ref || 0);
       if (!force && sig === lastText) return;
       const focused = input && (this.app.shadowActive() === input);
@@ -609,24 +638,38 @@ export class Inspector {
       if (same && input.tagName === 'SELECT') { input.value = String(d.raw); return; }
       build();
     };
-    lastText = desc.kind + '|' + desc.text + '|' + (desc.ref || 0);
-    build();
-    if (!spec.noLive) this.updaters.push(() => refresh(false));
+    try {
+      desc = spec.read();
+      lastText = desc.kind + '|' + desc.text + '|' + (desc.ref || 0);
+      build();
+    } catch (e) { showErr(e); } // a value that can't be read yet is retried by the live update
+    if (!spec.noLive) {
+      const u = () => refresh(false);
+      u.cell = cell;
+      this.updaters.push(u);
+    }
   }
 
   _flatStruct(p) {
     const il = this.il;
     const fs = il.fieldsOfStructType(p);
     if (!fs || !fs.length || fs.length > 4) return false;
-    return fs.every((f) => { const k = il.typeInfo(f.type).kind; return (k >= T.BOOLEAN && k <= T.R8) || k === T.I || k === T.U; });
+    // chars aren't in the struct summary text, so a struct with one can't round-trip as flat text
+    return fs.every((f) => { const k = il.typeInfo(f.type).kind; return k !== T.CHAR && ((k >= T.BOOLEAN && k <= T.R8) || k === T.I || k === T.U); });
   }
 
-  _editRef(cell, commit, desc) {
-    const inp = h('input.ue-in', { placeholder: 'null or @0x…', value: desc.ref ? '@' + hexAddr(desc.ref) : 'null' });
+  /** Inline editor for a reference. Enter writes; Escape (or leaving it) cancels and writes nothing. */
+  _editRef(cell, commit, desc, cancel) {
+    const inp = h('input.ue-in', { placeholder: 'null or @0x…', value: desc.ref ? '@' + hexAddr(desc.ref) : desc.kind === 'null' ? 'null' : '' });
     cell.replaceChildren(inp);
     inp.focus();
     inp.select();
-    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') commit(inp.value); if (e.key === 'Escape') commit(desc.ref ? '@' + hexAddr(desc.ref) : 'null'); });
+    let done = false;
+    inp.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { done = true; commit(inp.value); }
+      else if (e.key === 'Escape') { done = true; cancel(); }
+    });
+    inp.addEventListener('blur', () => { if (!done) { done = true; cancel(); } });
   }
 
   _openRef(ptr) {
@@ -703,7 +746,7 @@ export class Inspector {
         if (!acc) return false;
         const st = (acc.flags & METHOD.STATIC) !== 0;
         if (statics !== st) return false;
-        if (p.getter && p.getter.parameterCount > 0) return false; // indexers
+        if ((p.getter && p.getter.parameterCount > 0) || (!p.getter && p.setter.parameterCount > 1)) return false; // indexers
         return true;
       });
       if (props.length) groups.push({ td: t, title: il.tdShortName(t), props });
@@ -725,7 +768,8 @@ export class Inspector {
       const rows = h('div.mrows');
       const auto = this._autoEval(g.td);
       for (const p of g.props) {
-        const type = p.getter ? il.typePtr(p.getter.returnType) : il.params(p.setter)[0].type;
+        // a setter's value is its last parameter
+        const type = p.getter ? il.typePtr(p.getter.returnType) : il.params(p.setter).at(-1).type;
         const val = h('div.val');
         const sub = h('div');
         const getterOk = p.getter && !il.whyNotCallable(p.getter);
@@ -766,6 +810,8 @@ export class Inspector {
     for (const t of il.hierarchy(td)) {
       const ms = il.methodsOf(t).filter((m) => {
         const st = (m.flags & METHOD.STATIC) !== 0;
+        // constructors are listed with the statics (as "New"), for types that can be created
+        if (statics && m.name === '.ctor' && !st) { const d = il.md.typeDef(t); return t === td && !d.isAbstract && !d.isInterface; }
         if (statics !== st) return false;
         if (m.name === '.cctor') return false;
         if (!statics && m.name === '.ctor') return false;
@@ -904,7 +950,7 @@ export class Inspector {
     const ptd = il.parentTd(td);
     if (ptd >= 0) chips.push(h('span.chip.click', { on: { click: () => this.show({ kind: 'static', td: ptd }) } }, 'base: ', il.tdShortName(ptd)));
     if (d.declaringTypeIndex >= 0) { const dt = il.tdOfTypeIndex(d.declaringTypeIndex); if (dt >= 0) chips.push(h('span.chip.click', { on: { click: () => this.show({ kind: 'static', td: dt }) } }, 'in: ', il.tdShortName(dt))); }
-    if (!d.isGeneric) chips.push(h('span.chip' + (k && il.staticFieldsBase(k) ? '' : '.amber'), k ? (il.staticFieldsBase(k) || !this._hasStatics(td) ? 'loaded' : 'statics not initialized') : 'not loaded'));
+    if (!d.isGeneric) { const ready = k && (il.staticFieldsBase(k) || !this._hasStatics(td)); chips.push(h('span.chip' + (ready ? '' : '.amber'), k ? (ready ? 'loaded' : 'statics not initialized') : 'not loaded')); }
     if (k) chips.push(this._addrChip(k));
 
     const actions = [];
@@ -929,7 +975,7 @@ export class Inspector {
     defs.push(['members', 'Layout', null]);
     this._tabs(defs);
     this.body.replaceChildren();
-    if (d.isGeneric && this.tab !== 'members' && this.tab !== 'nested') this.body.append(h('div.ue-note', 'This is a generic type definition. Static values live on each instantiation (e.g. <code>List&lt;int&gt;</code>) and are not shown here.'));
+    if (d.isGeneric && this.tab !== 'members' && this.tab !== 'nested') this.body.append(h('div.ue-note', { html: 'This is a generic type definition. Static values live on each instantiation (e.g. <code>List&lt;int&gt;</code>) and are not shown here.' }));
 
     if (this.tab === 'fields') {
       const sbase = k ? il.staticFieldsBase(k) : 0;
@@ -957,7 +1003,7 @@ export class Inspector {
         const off = il.metaFieldOffset(td, f.local);
         rows.append(h('div.mrow', { 'data-name': f.name }, icon(I.field, 'ico f'), h('div.nm', f.name), this._typeLabel(f.type), h('div.v-dim.ue-mono', off >= 0 ? '+0x' + off.toString(16) : '')));
       }
-      for (const p of il.propertiesOf(td)) rows.append(h('div.mrow', { 'data-name': p.name }, icon(I.prop, 'ico p'), h('div.nm', p.name), p.getter ? this._typeLabel(il.typePtr(p.getter.returnType)) : h('div'), h('div.v-dim', (p.getter ? 'get; ' : '') + (p.setter ? 'set;' : ''))));
+      for (const p of il.propertiesOf(td).filter((x) => { const a = x.getter || x.setter; return a && !(a.flags & METHOD.STATIC); })) rows.append(h('div.mrow', { 'data-name': p.name }, icon(I.prop, 'ico p'), h('div.nm', p.name), p.getter ? this._typeLabel(il.typePtr(p.getter.returnType)) : h('div'), h('div.v-dim', (p.getter ? 'get; ' : '') + (p.setter ? 'set;' : ''))));
       for (const m of il.methodsOf(td).filter((x) => !(x.flags & METHOD.STATIC) && !(x.flags & METHOD.SPECIAL))) {
         rows.append(h('div.mrow', { 'data-name': m.name, style: { gridTemplateColumns: '18px 1fr' } }, icon(I.method, 'ico m'), h('div.msig', { html: this._sig(m), style: { gridColumn: 'auto' } })));
       }
@@ -993,6 +1039,8 @@ export class Inspector {
 
   _instancesInline(td, list) {
     this.tab = 'members';
+    this.updaters = [];
+    this.tabs.querySelectorAll('.ins-tab.on').forEach((x) => x.classList.remove('on'));
     this.body.replaceChildren();
     const rows = h('div.mrows');
     for (const p of list.slice(0, 1000)) rows.append(h('div.mrow', { style: { gridTemplateColumns: '18px 1fr auto' } }, icon(I.klass, 'ico'), h('div.v-ref', { text: this.fmt.objectSummary(p), on: { click: () => this._openRef(p) } }), h('div.v-dim.ue-mono', hexAddr(p))));

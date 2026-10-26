@@ -1,6 +1,7 @@
 /** Resize the window by dragging the bottom-right grip. */
 export function enableResize(win, grip) {
   grip.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
     grip.setPointerCapture(e.pointerId);
@@ -14,8 +15,12 @@ export function enableResize(win, grip) {
     const up = () => {
       grip.removeEventListener('pointermove', move);
       grip.removeEventListener('pointerup', up);
+      grip.removeEventListener('pointercancel', up);
+      grip.removeEventListener('lostpointercapture', up);
     };
     grip.addEventListener('pointermove', move);
     grip.addEventListener('pointerup', up);
+    grip.addEventListener('pointercancel', up);
+    grip.addEventListener('lostpointercapture', up);
   });
 }

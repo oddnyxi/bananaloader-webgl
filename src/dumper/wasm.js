@@ -149,10 +149,13 @@ export class WasmModule {
     let max = 0;
     for (const k of table.keys()) if (k > max) max = k;
     const slotType = new Int32Array(max + 1).fill(-1);
+    const slotFunc = new Int32Array(max + 1).fill(-1);
     const stubSlot = new Uint8Array(max + 1);
-    for (const [slot, f] of table) { slotType[slot] = this.funcType[f] ?? -1; if (stubs.has(f)) stubSlot[slot] = 1; }
-    const self = this;
-    const callTypes = new Map();
+    for (const [slot, f] of table) { slotType[slot] = this.funcType[f] ?? -1; slotFunc[slot] = f; if (stubs.has(f)) stubSlot[slot] = 1; }
+    // first call_indirect type of every function in the table, worked out now so this object
+    // doesn't keep the module (and its bytes) alive
+    const firstCall = new Int32Array(this.funcCount).fill(-1);
+    for (const f of new Set(table.values())) if (f >= this.importedFuncs) firstCall[f] = this.firstCallIndirect(f);
     return {
       count: table.size,
       stubs: stubs.size,
@@ -162,13 +165,9 @@ export class WasmModule {
        * their method that way, so for an invoker it's the method's exact wasm signature.
        */
       callTypeAt(slot) {
-        const f = table.get(slot);
-        if (f === undefined || f < self.importedFuncs) return null;
-        if (callTypes.has(f)) return callTypes.get(f);
-        const t = self.firstCallIndirect(f);
-        const r = t >= 0 ? types[t] : null;
-        callTypes.set(f, r);
-        return r;
+        const f = slot >= 0 && slot < slotFunc.length ? slotFunc[slot] : -1;
+        const t = f >= 0 ? firstCall[f] : -1;
+        return t >= 0 ? types[t] : null;
       },
       /** Empty slot: missing, or fastcomp's abort(N) placeholder for an unused pointer. */
       isStub(slot) { return !(slot >= 0 && slot < slotType.length) || slotType[slot] < 0 || stubSlot[slot] === 1; },

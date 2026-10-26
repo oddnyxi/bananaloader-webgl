@@ -1,9 +1,12 @@
 import { el } from '../utils/dom.js';
 
 export function createNumberInput(text, action, o = {}) {
-  const { min = -Infinity, max = Infinity, step = 1 } = o;
-  let val = o.value ?? (isFinite(min) ? min : 0);
-  const dp = (String(step).split('.')[1] || '').length;
+  const num = (x, d) => (x == null || x === '' || !Number.isFinite(+x) ? d : +x);
+  const min = num(o.min, -Infinity), max = num(o.max, Infinity);
+  const step = num(o.step, 1) || 1;
+  // decimals the step needs, also for exponent forms like 1e-7
+  const dp = Math.min(20, Math.max(0, -Math.floor(Math.log10(Math.abs(step) - Math.floor(Math.abs(step)) || 1)), (String(step).split('.')[1] || '').length));
+  let val = num(o.value, isFinite(min) ? min : 0);
 
   const n = el('div', 'card row');
   const l = el('span', 'lbl');
@@ -29,6 +32,7 @@ export function createNumberInput(text, action, o = {}) {
   dec.onclick = () => set(val - step);
   inc.onclick = () => set(val + step);
   i.onchange = () => set(i.value);
+  val = Math.min(max, Math.max(min, val));
   i.value = val;
 
   c.getValue = () => val;

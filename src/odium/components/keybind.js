@@ -31,6 +31,8 @@ export function createKeybind(text, action, o = {}) {
 
   c.getValue = () => spec;
   c.setValue = set;
+  // a destroyed keybind (or the tab it's on) stops firing onPress
+  c._onDestroy(() => { if (bound) this.ui.unbindKey(bound); bound = null; });
   show();
   rebind();
   return this._reg(c, text, o);
